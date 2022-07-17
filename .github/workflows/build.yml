@@ -1,0 +1,22 @@
+name: Build
+# env:
+#   GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - run: printenv|sort
+
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make test

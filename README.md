@@ -1,3 +1,2 @@
-# _template
 
-my template for new repositories
+playground stuff

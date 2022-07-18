@@ -3,21 +3,18 @@ name: Docker
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "15 0 * * *"
 
 jobs:
   docker:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
-      - uses: docker-practice/actions-setup-docker@master
-      - run: |
-          set -x
-          docker version
-          docker run --rm hello-world
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -37,13 +34,16 @@ jobs:
         uses: docker/metadata-action@v4
         with:
           images: |
-            ghcr.io/batmac/docker-zig
+            ghcr.io/batmac/zig
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=edge,branch=main
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=schedule,pattern=nightly
+            type=schedule,pattern={{date 'YYYYMMDD'}}
 
       - name: Build and push
         uses: docker/build-push-action@v3

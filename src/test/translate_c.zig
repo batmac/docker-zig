@@ -6,6 +6,67 @@ const CrossTarget = std.zig.CrossTarget;
 pub fn addCases(cases: *tests.TranslateCContext) void {
     const default_enum_type = if (builtin.abi == .msvc) "c_int" else "c_uint";
 
+    cases.add("do while with breaks",
+        \\void foo(int a) {
+        \\    do {
+        \\        if (a) break;
+        \\    } while (4);
+        \\    do {
+        \\        if (a) break;
+        \\    } while (0);
+        \\    do {
+        \\        if (a) break;
+        \\    } while (a);
+        \\    do {
+        \\        break;
+        \\    } while (3);
+        \\    do {
+        \\        break;
+        \\    } while (0);
+        \\    do {
+        \\        break;
+        \\    } while (a);
+        \\}
+    , &[_][]const u8{
+        \\pub export fn foo(arg_a: c_int) void {
+        \\    var a = arg_a;
+        \\    while (true) {
+        \\        if (a != 0) break;
+        \\    }
+        \\    while (true) {
+        \\        if (a != 0) break;
+        \\        if (!false) break;
+        \\    }
+        \\    while (true) {
+        \\        if (a != 0) break;
+        \\        if (!(a != 0)) break;
+        \\    }
+        \\    while (true) {
+        \\        break;
+        \\    }
+        \\    while (true) {
+        \\        break;
+        \\    }
+        \\    while (true) {
+        \\        break;
+        \\    }
+        \\}
+    });
+
+    cases.add("variables check for opaque demotion",
+        \\struct A {
+        \\    _Atomic int a;
+        \\} a;
+        \\int main(void) {
+        \\    struct A a;
+        \\}
+    , &[_][]const u8{
+        \\pub const struct_A = opaque {};
+        \\pub const a = @compileError("non-extern variable has opaque type");
+        ,
+        \\pub extern fn main() c_int;
+    });
+
     cases.add("field access is grouped if necessary",
         \\unsigned long foo(unsigned long x) {
         \\    return ((union{unsigned long _x}){x})._x;
@@ -427,7 +488,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub export fn foo() void {
         \\    while (false) while (false) {};
         \\    while (true) while (false) {};
-        \\    while (true) {}
+        \\    while (true) while (true) {
+        \\        if (!false) break;
+        \\    };
         \\}
     });
 
@@ -678,22 +741,26 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\};
     });
 
-    cases.add("align() attribute",
-        \\__attribute__ ((aligned(128)))
-        \\extern char my_array[16];
-        \\__attribute__ ((aligned(128)))
-        \\void my_fn(void) { }
-        \\void other_fn(void) {
-        \\    char ARR[16] __attribute__ ((aligned (16)));
-        \\}
-    , &[_][]const u8{
-        \\pub extern var my_array: [16]u8 align(128);
-        \\pub export fn my_fn() align(128) void {}
-        \\pub export fn other_fn() void {
-        \\    var ARR: [16]u8 align(16) = undefined;
-        \\    _ = ARR;
-        \\}
-    });
+    // Test case temporarily disabled:
+    // https://github.com/ziglang/zig/issues/12055
+    if (false) {
+        cases.add("align() attribute",
+            \\__attribute__ ((aligned(128)))
+            \\extern char my_array[16];
+            \\__attribute__ ((aligned(128)))
+            \\void my_fn(void) { }
+            \\void other_fn(void) {
+            \\    char ARR[16] __attribute__ ((aligned (16)));
+            \\}
+        , &[_][]const u8{
+            \\pub extern var my_array: [16]u8 align(128);
+            \\pub export fn my_fn() align(128) void {}
+            \\pub export fn other_fn() void {
+            \\    var ARR: [16]u8 align(16) = undefined;
+            \\    _ = ARR;
+            \\}
+        });
+    }
 
     cases.add("linksection() attribute",
         \\// Use the "segment,section" format to make this test pass when
@@ -2076,7 +2143,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
     , &[_][]const u8{
         \\pub export var @"anyerror": c_uint = 2;
         ,
-        \\pub const @"noreturn" = @compileError("unable to translate C expr: unexpected token .Keyword_noreturn");
+        \\pub const @"noreturn" = @compileError("unable to translate C expr: unexpected token '_Noreturn'");
         ,
         \\pub const @"f32": c_int = 0;
         \\pub const @"u32": c_int = 1;
@@ -3215,7 +3282,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
     , &[_][]const u8{
         \\pub fn foo() callconv(.C) void {
-        \\    if (true) {}
+        \\    if (true) while (true) {
+        \\        if (!false) break;
+        \\    };
         \\}
     });
 
@@ -3587,7 +3656,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    struct my_struct S = {.a = 1, .b = 2};
         \\}
     , &[_][]const u8{
-        \\warning: cannot initialize opaque type
+        \\warning: local variable has opaque type
         ,
         \\warning: unable to translate function, demoted to extern
         \\pub extern fn initialize() void;
@@ -3605,6 +3674,30 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         ,
         \\warning: unable to translate function, demoted to extern
         \\pub extern fn deref(arg_s: ?*struct_my_struct) void;
+    });
+
+    cases.add("Demote function that dereference types that contain opaque type",
+        \\struct inner {
+        \\    _Atomic int a;            
+        \\};
+        \\struct outer {
+        \\    int thing;
+        \\    struct inner sub_struct;
+        \\};
+        \\void deref(struct outer *s) {
+        \\    *s;
+        \\}
+    , &[_][]const u8{
+        \\pub const struct_inner = opaque {};
+        ,
+        \\pub const struct_outer = extern struct {
+        \\    thing: c_int,
+        \\    sub_struct: struct_inner,
+        \\};
+        ,
+        \\warning: unable to translate function, demoted to extern
+        ,
+        \\pub extern fn deref(arg_s: ?*struct_outer) void;
     });
 
     cases.add("Function prototype declared within function",

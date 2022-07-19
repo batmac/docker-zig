@@ -161,7 +161,12 @@ pub const ASTUnit = opaque {
     extern fn ZigClangASTUnit_getSourceManager(*ASTUnit) *SourceManager;
 
     pub const visitLocalTopLevelDecls = ZigClangASTUnit_visitLocalTopLevelDecls;
-    extern fn ZigClangASTUnit_visitLocalTopLevelDecls(*ASTUnit, context: ?*anyopaque, Fn: ?fn (?*anyopaque, *const Decl) callconv(.C) bool) bool;
+    extern fn ZigClangASTUnit_visitLocalTopLevelDecls(*ASTUnit, context: ?*anyopaque, Fn: ?VisitorFn) bool;
+
+    const VisitorFn = if (@import("builtin").zig_backend == .stage1)
+        fn (?*anyopaque, *const Decl) callconv(.C) bool
+    else
+        *const fn (?*anyopaque, *const Decl) callconv(.C) bool;
 
     pub const getLocalPreprocessingEntities_begin = ZigClangASTUnit_getLocalPreprocessingEntities_begin;
     extern fn ZigClangASTUnit_getLocalPreprocessingEntities_begin(*ASTUnit) PreprocessingRecord.iterator;
@@ -256,6 +261,14 @@ pub const CaseStmt = opaque {
 
     pub const getSubStmt = ZigClangCaseStmt_getSubStmt;
     extern fn ZigClangCaseStmt_getSubStmt(*const CaseStmt) *const Stmt;
+};
+
+pub const CastExpr = opaque {
+    pub const getCastKind = ZigClangCastExpr_getCastKind;
+    extern fn ZigClangCastExpr_getCastKind(*const CastExpr) CK;
+
+    pub const getTargetFieldForToUnionCast = ZigClangCastExpr_getTargetFieldForToUnionCast;
+    extern fn ZigClangCastExpr_getTargetFieldForToUnionCast(*const CastExpr, QualType, QualType) ?*const FieldDecl;
 };
 
 pub const CharacterLiteral = opaque {
@@ -482,8 +495,8 @@ pub const FloatingLiteral = opaque {
     pub const getValueAsApproximateDouble = ZigClangFloatingLiteral_getValueAsApproximateDouble;
     extern fn ZigClangFloatingLiteral_getValueAsApproximateDouble(*const FloatingLiteral) f64;
 
-    pub const getBeginLoc = ZigClangIntegerLiteral_getBeginLoc;
-    extern fn ZigClangIntegerLiteral_getBeginLoc(*const FloatingLiteral) SourceLocation;
+    pub const getBeginLoc = ZigClangFloatingLiteral_getBeginLoc;
+    extern fn ZigClangFloatingLiteral_getBeginLoc(*const FloatingLiteral) SourceLocation;
 
     pub const getRawSemantics = ZigClangFloatingLiteral_getRawSemantics;
     extern fn ZigClangFloatingLiteral_getRawSemantics(*const FloatingLiteral) APFloatBaseSemantics;
@@ -1104,6 +1117,7 @@ pub const TypeClass = enum(c_int) {
     VariableArray,
     Atomic,
     Attributed,
+    BitInt,
     BlockPointer,
     Builtin,
     Complex,
@@ -1111,13 +1125,12 @@ pub const TypeClass = enum(c_int) {
     Auto,
     DeducedTemplateSpecialization,
     DependentAddressSpace,
-    DependentExtInt,
+    DependentBitInt,
     DependentName,
     DependentSizedExtVector,
     DependentTemplateSpecialization,
     DependentVector,
     Elaborated,
-    ExtInt,
     FunctionNoProto,
     FunctionProto,
     InjectedClassName,
@@ -1146,6 +1159,7 @@ pub const TypeClass = enum(c_int) {
     Typedef,
     UnaryTransform,
     UnresolvedUsing,
+    Using,
     Vector,
     ExtVector,
 };
@@ -1187,6 +1201,7 @@ const StmtClass = enum(c_int) {
     OMPDistributeSimdDirectiveClass,
     OMPForDirectiveClass,
     OMPForSimdDirectiveClass,
+    OMPGenericLoopDirectiveClass,
     OMPMasterTaskLoopDirectiveClass,
     OMPMasterTaskLoopSimdDirectiveClass,
     OMPParallelForDirectiveClass,
@@ -1210,6 +1225,7 @@ const StmtClass = enum(c_int) {
     OMPUnrollDirectiveClass,
     OMPMaskedDirectiveClass,
     OMPMasterDirectiveClass,
+    OMPMetaDirectiveClass,
     OMPOrderedDirectiveClass,
     OMPParallelDirectiveClass,
     OMPParallelMasterDirectiveClass,
@@ -1746,6 +1762,7 @@ pub const BuiltinTypeKind = enum(c_int) {
     Float16,
     BFloat16,
     Float128,
+    Ibm128,
     NullPtr,
     ObjCId,
     ObjCClass,

@@ -103,6 +103,7 @@ struct ZigClangBuiltinType;
 struct ZigClangCStyleCastExpr;
 struct ZigClangCallExpr;
 struct ZigClangCaseStmt;
+struct ZigClangCastExpr;
 struct ZigClangCharacterLiteral;
 struct ZigClangChooseExpr;
 struct ZigClangCompoundAssignOperator;
@@ -251,6 +252,7 @@ enum ZigClangTypeClass {
     ZigClangType_VariableArray,
     ZigClangType_Atomic,
     ZigClangType_Attributed,
+    ZigClangType_BitInt,
     ZigClangType_BlockPointer,
     ZigClangType_Builtin,
     ZigClangType_Complex,
@@ -258,13 +260,12 @@ enum ZigClangTypeClass {
     ZigClangType_Auto,
     ZigClangType_DeducedTemplateSpecialization,
     ZigClangType_DependentAddressSpace,
-    ZigClangType_DependentExtInt,
+    ZigClangType_DependentBitInt,
     ZigClangType_DependentName,
     ZigClangType_DependentSizedExtVector,
     ZigClangType_DependentTemplateSpecialization,
     ZigClangType_DependentVector,
     ZigClangType_Elaborated,
-    ZigClangType_ExtInt,
     ZigClangType_FunctionNoProto,
     ZigClangType_FunctionProto,
     ZigClangType_InjectedClassName,
@@ -293,6 +294,7 @@ enum ZigClangTypeClass {
     ZigClangType_Typedef,
     ZigClangType_UnaryTransform,
     ZigClangType_UnresolvedUsing,
+    ZigClangType_Using,
     ZigClangType_Vector,
     ZigClangType_ExtVector,
 };
@@ -334,6 +336,7 @@ enum ZigClangStmtClass {
     ZigClangStmt_OMPDistributeSimdDirectiveClass,
     ZigClangStmt_OMPForDirectiveClass,
     ZigClangStmt_OMPForSimdDirectiveClass,
+    ZigClangStmt_OMPGenericLoopDirectiveClass,
     ZigClangStmt_OMPMasterTaskLoopDirectiveClass,
     ZigClangStmt_OMPMasterTaskLoopSimdDirectiveClass,
     ZigClangStmt_OMPParallelForDirectiveClass,
@@ -357,6 +360,7 @@ enum ZigClangStmtClass {
     ZigClangStmt_OMPUnrollDirectiveClass,
     ZigClangStmt_OMPMaskedDirectiveClass,
     ZigClangStmt_OMPMasterDirectiveClass,
+    ZigClangStmt_OMPMetaDirectiveClass,
     ZigClangStmt_OMPOrderedDirectiveClass,
     ZigClangStmt_OMPParallelDirectiveClass,
     ZigClangStmt_OMPParallelMasterDirectiveClass,
@@ -893,6 +897,7 @@ enum ZigClangBuiltinTypeKind {
     ZigClangBuiltinTypeFloat16,
     ZigClangBuiltinTypeBFloat16,
     ZigClangBuiltinTypeFloat128,
+    ZigClangBuiltinTypeIbm128,
     ZigClangBuiltinTypeNullPtr,
     ZigClangBuiltinTypeObjCId,
     ZigClangBuiltinTypeObjCClass,
@@ -1049,7 +1054,8 @@ ZIG_EXTERN_C struct ZigClangSourceLocation ZigClangLexer_getLocForEndOfToken(str
         const ZigClangSourceManager *, const ZigClangASTUnit *);
 
 // Can return null.
-ZIG_EXTERN_C struct ZigClangASTUnit *ZigClangLoadFromCommandLine(const char **args_begin, const char **args_end,
+ZIG_EXTERN_C struct ZigClangASTUnit *ZigClangLoadFromCommandLine(
+        const char **args_begin, const char **args_end,
         struct Stage2ErrorMsg **errors_ptr, size_t *errors_len, const char *resources_path);
 ZIG_EXTERN_C void ZigClangASTUnit_delete(struct ZigClangASTUnit *);
 ZIG_EXTERN_C void ZigClangErrorMsg_delete(struct Stage2ErrorMsg *ptr, size_t len);
@@ -1244,6 +1250,7 @@ ZIG_EXTERN_C struct ZigClangSourceLocation ZigClangDeclStmt_getBeginLoc(const st
 ZIG_EXTERN_C unsigned ZigClangAPFloat_convertToHexString(const struct ZigClangAPFloat *self, char *DST,
         unsigned HexDigits, bool UpperCase, enum ZigClangAPFloat_roundingMode RM);
 ZIG_EXTERN_C double ZigClangFloatingLiteral_getValueAsApproximateDouble(const ZigClangFloatingLiteral *self);
+ZIG_EXTERN_C struct ZigClangSourceLocation ZigClangFloatingLiteral_getBeginLoc(const struct ZigClangFloatingLiteral *);
 ZIG_EXTERN_C ZigClangAPFloatBase_Semantics ZigClangFloatingLiteral_getRawSemantics(const ZigClangFloatingLiteral *self);
 
 ZIG_EXTERN_C enum ZigClangStringLiteral_StringKind ZigClangStringLiteral_getKind(const struct ZigClangStringLiteral *self);
@@ -1316,6 +1323,9 @@ ZIG_EXTERN_C struct ZigClangQualType ZigClangConvertVectorExpr_getTypeSourceInfo
 ZIG_EXTERN_C struct ZigClangQualType ZigClangDecayedType_getDecayedType(const struct ZigClangDecayedType *);
 
 ZIG_EXTERN_C const struct ZigClangCompoundStmt *ZigClangStmtExpr_getSubStmt(const struct ZigClangStmtExpr *);
+
+ZIG_EXTERN_C enum ZigClangCK ZigClangCastExpr_getCastKind(const struct ZigClangCastExpr *);
+ZIG_EXTERN_C const struct ZigClangFieldDecl *ZigClangCastExpr_getTargetFieldForToUnionCast(const struct ZigClangCastExpr *, struct ZigClangQualType, struct ZigClangQualType);
 
 ZIG_EXTERN_C struct ZigClangSourceLocation ZigClangCharacterLiteral_getBeginLoc(const struct ZigClangCharacterLiteral *);
 ZIG_EXTERN_C enum ZigClangCharacterLiteral_CharacterKind ZigClangCharacterLiteral_getKind(const struct ZigClangCharacterLiteral *);

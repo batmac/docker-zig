@@ -38,7 +38,7 @@ const arch_bits = switch (native_arch) {
     .aarch64 => @import("linux/arm64.zig"),
     .arm, .thumb => @import("linux/arm-eabi.zig"),
     .riscv64 => @import("linux/riscv64.zig"),
-    .sparcv9 => @import("linux/sparc64.zig"),
+    .sparc64 => @import("linux/sparc64.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
     .powerpc => @import("linux/powerpc.zig"),
     .powerpc64, .powerpc64le => @import("linux/powerpc64.zig"),
@@ -67,7 +67,6 @@ pub const LOCK = arch_bits.LOCK;
 pub const MMAP2_UNIT = arch_bits.MMAP2_UNIT;
 pub const REG = arch_bits.REG;
 pub const SC = arch_bits.SC;
-pub const SYS = arch_bits.SYS;
 pub const Stat = arch_bits.Stat;
 pub const VDSO = arch_bits.VDSO;
 pub const blkcnt_t = arch_bits.blkcnt_t;
@@ -91,6 +90,21 @@ pub const tls = @import("linux/tls.zig");
 pub const pie = @import("linux/start_pie.zig");
 pub const BPF = @import("linux/bpf.zig");
 pub const IOCTL = @import("linux/ioctl.zig");
+pub const SECCOMP = @import("linux/seccomp.zig");
+
+pub const syscalls = @import("linux/syscalls.zig");
+pub const SYS = switch (@import("builtin").cpu.arch) {
+    .i386 => syscalls.X86,
+    .x86_64 => syscalls.X64,
+    .aarch64 => syscalls.Arm64,
+    .arm, .thumb => syscalls.Arm,
+    .riscv64 => syscalls.RiscV64,
+    .sparc64 => syscalls.Sparc64,
+    .mips, .mipsel => syscalls.Mips,
+    .powerpc => syscalls.PowerPC,
+    .powerpc64, .powerpc64le => syscalls.PowerPC64,
+    else => @compileError("The Zig Standard Library is missing syscall definitions for the target CPU architecture"),
+};
 
 pub const MAP = struct {
     pub usingnamespace arch_bits.MAP;
@@ -362,7 +376,7 @@ pub fn mknodat(dirfd: i32, path: [*:0]const u8, mode: u32, dev: u32) usize {
     return syscall4(.mknodat, @bitCast(usize, @as(isize, dirfd)), @ptrToInt(path), mode, dev);
 }
 
-pub fn mount(special: [*:0]const u8, dir: [*:0]const u8, fstype: [*:0]const u8, flags: u32, data: usize) usize {
+pub fn mount(special: [*:0]const u8, dir: [*:0]const u8, fstype: ?[*:0]const u8, flags: u32, data: usize) usize {
     return syscall5(.mount, @ptrToInt(special), @ptrToInt(dir), @ptrToInt(fstype), flags, data);
 }
 
@@ -404,6 +418,16 @@ pub fn mmap(address: ?[*]u8, length: usize, prot: usize, flags: u32, fd: i32, of
 
 pub fn mprotect(address: [*]const u8, length: usize, protection: usize) usize {
     return syscall3(.mprotect, @ptrToInt(address), length, protection);
+}
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
+};
+
+pub fn msync(address: [*]const u8, length: usize, flags: i32) usize {
+    return syscall3(.msync, @ptrToInt(address), length, @bitCast(u32, flags));
 }
 
 pub fn munmap(address: [*]const u8, length: usize) usize {
@@ -855,10 +879,16 @@ pub fn flock(fd: fd_t, operation: i32) usize {
     return syscall2(.flock, @bitCast(usize, @as(isize, fd)), @bitCast(usize, @as(isize, operation)));
 }
 
-var vdso_clock_gettime = @ptrCast(?*const anyopaque, init_vdso_clock_gettime);
+var vdso_clock_gettime = if (builtin.zig_backend == .stage1)
+    @ptrCast(?*const anyopaque, init_vdso_clock_gettime)
+else
+    @ptrCast(?*const anyopaque, &init_vdso_clock_gettime);
 
 // We must follow the C calling convention when we call into the VDSO
-const vdso_clock_gettime_ty = fn (i32, *timespec) callconv(.C) usize;
+const vdso_clock_gettime_ty = if (builtin.zig_backend == .stage1)
+    fn (i32, *timespec) callconv(.C) usize
+else
+    *const fn (i32, *timespec) callconv(.C) usize;
 
 pub fn clock_gettime(clk_id: i32, tp: *timespec) usize {
     if (@hasDecl(VDSO, "CGT_SYM")) {
@@ -1034,7 +1064,7 @@ pub fn getgroups(size: usize, list: *gid_t) usize {
     }
 }
 
-pub fn setgroups(size: usize, list: *const gid_t) usize {
+pub fn setgroups(size: usize, list: [*]const gid_t) usize {
     if (@hasField(SYS, "setgroups32")) {
         return syscall2(.setgroups32, size, @ptrToInt(list));
     } else {
@@ -1064,12 +1094,14 @@ pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigact
     const mask_size = @sizeOf(@TypeOf(ksa.mask));
 
     if (act) |new| {
-        const restorer_fn = if ((new.flags & SA.SIGINFO) != 0) restore_rt else restore;
+        const restore_rt_ptr = if (builtin.zig_backend == .stage1) restore_rt else &restore_rt;
+        const restore_ptr = if (builtin.zig_backend == .stage1) restore else &restore;
+        const restorer_fn = if ((new.flags & SA.SIGINFO) != 0) restore_rt_ptr else restore_ptr;
         ksa = k_sigaction{
             .handler = new.handler.handler,
             .flags = new.flags | SA.RESTORER,
             .mask = undefined,
-            .restorer = @ptrCast(fn () callconv(.C) void, restorer_fn),
+            .restorer = @ptrCast(k_sigaction_funcs.restorer, restorer_fn),
         };
         @memcpy(@ptrCast([*]u8, &ksa.mask), @ptrCast([*]const u8, &new.mask), mask_size);
     }
@@ -1079,7 +1111,7 @@ pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigact
 
     const result = switch (native_arch) {
         // The sparc version of rt_sigaction needs the restorer function to be passed as an argument too.
-        .sparc, .sparcv9 => syscall5(.rt_sigaction, sig, ksa_arg, oldksa_arg, @ptrToInt(ksa.restorer), mask_size),
+        .sparc, .sparc64 => syscall5(.rt_sigaction, sig, ksa_arg, oldksa_arg, @ptrToInt(ksa.restorer), mask_size),
         else => syscall4(.rt_sigaction, sig, ksa_arg, oldksa_arg, mask_size),
     };
     if (getErrno(result) != .SUCCESS) return result;
@@ -1259,11 +1291,11 @@ pub fn sendfile(outfd: i32, infd: i32, offset: ?*i64, count: usize) usize {
     }
 }
 
-pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: [2]i32) usize {
+pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: *[2]i32) usize {
     if (native_arch == .i386) {
-        return socketcall(SC.socketpair, &[4]usize{ @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(&fd[0]) });
+        return socketcall(SC.socketpair, &[4]usize{ @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd) });
     }
-    return syscall4(.socketpair, @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(&fd[0]));
+    return syscall4(.socketpair, @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd));
 }
 
 pub fn accept(fd: i32, noalias addr: ?*sockaddr, noalias len: ?*socklen_t) usize {
@@ -1673,9 +1705,13 @@ pub fn perf_event_open(
     );
 }
 
+pub fn seccomp(operation: u32, flags: u32, args: ?*const anyopaque) usize {
+    return syscall3(.seccomp, operation, flags, @ptrToInt(args));
+}
+
 pub const E = switch (native_arch) {
     .mips, .mipsel => @import("linux/errno/mips.zig").E,
-    .sparc, .sparcel, .sparcv9 => @import("linux/errno/sparc.zig").E,
+    .sparc, .sparcel, .sparc64 => @import("linux/errno/sparc.zig").E,
     else => @import("linux/errno/generic.zig").E,
 };
 
@@ -3028,42 +3064,58 @@ pub const NSIG = if (is_mips) 128 else 65;
 
 pub const sigset_t = [1024 / 32]u32;
 
-pub const all_mask: sigset_t = [_]u32{0xffffffff} ** sigset_t.len;
+pub const all_mask: sigset_t = [_]u32{0xffffffff} ** @typeInfo(sigset_t).Array.len;
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
+
+const k_sigaction_funcs = if (builtin.zig_backend == .stage1) struct {
+    const handler = ?fn (c_int) callconv(.C) void;
+    const restorer = fn () callconv(.C) void;
+} else struct {
+    const handler = ?*const fn (c_int) callconv(.C) void;
+    const restorer = *const fn () callconv(.C) void;
+};
 
 pub const k_sigaction = switch (native_arch) {
     .mips, .mipsel => extern struct {
         flags: c_uint,
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         mask: [4]c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
     },
     .mips64, .mips64el => extern struct {
         flags: c_uint,
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         mask: [2]c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
     },
     else => extern struct {
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         flags: c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
         mask: [2]c_uint,
     },
 };
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = fn (c_int) callconv(.C) void;
-    pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub usingnamespace if (builtin.zig_backend == .stage1) struct {
+        pub const handler_fn = fn (c_int) callconv(.C) void;
+        pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    } else struct {
+        pub const handler_fn = *const fn (c_int) callconv(.C) void;
+        pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    };
 
     handler: extern union {
-        handler: ?handler_fn,
-        sigaction: ?sigaction_fn,
+        handler: ?Sigaction.handler_fn,
+        sigaction: ?Sigaction.sigaction_fn,
     },
     mask: sigset_t,
     flags: c_uint,
-    restorer: ?fn () callconv(.C) void = null,
+    restorer: ?if (builtin.zig_backend == .stage1)
+        fn () callconv(.C) void
+    else
+        *const fn () callconv(.C) void = null,
 };
 
 pub const empty_sigset = [_]u32{0} ** @typeInfo(sigset_t).Array.len;
@@ -3170,16 +3222,21 @@ pub const epoll_data = extern union {
     @"u64": u64,
 };
 
-// On x86_64 the structure is packed so that it matches the definition of its
-// 32bit counterpart
-pub const epoll_event = switch (native_arch) {
-    .x86_64 => packed struct {
-        events: u32,
-        data: epoll_data,
+pub const epoll_event = switch (builtin.zig_backend) {
+    // stage1 crashes with the align(4) field so we have this workaround
+    .stage1 => switch (native_arch) {
+        .x86_64 => packed struct {
+            events: u32,
+            data: epoll_data,
+        },
+        else => extern struct {
+            events: u32,
+            data: epoll_data,
+        },
     },
     else => extern struct {
         events: u32,
-        data: epoll_data,
+        data: epoll_data align(4),
     },
 };
 
@@ -3933,11 +3990,6 @@ pub const POLL = struct {
     pub const RDBAND = 0x080;
 };
 
-pub const MFD_CLOEXEC = 0x0001;
-pub const MFD_ALLOW_SEALING = 0x0002;
-pub const MFD_HUGETLB = 0x0004;
-pub const MFD_ALL_FLAGS = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB;
-
 pub const HUGETLB_FLAG_ENCODE_SHIFT = 26;
 pub const HUGETLB_FLAG_ENCODE_MASK = 0x3f;
 pub const HUGETLB_FLAG_ENCODE_64KB = 16 << HUGETLB_FLAG_ENCODE_SHIFT;
@@ -3953,20 +4005,27 @@ pub const HUGETLB_FLAG_ENCODE_1GB = 30 << HUGETLB_FLAG_ENCODE_SHIFT;
 pub const HUGETLB_FLAG_ENCODE_2GB = 31 << HUGETLB_FLAG_ENCODE_SHIFT;
 pub const HUGETLB_FLAG_ENCODE_16GB = 34 << HUGETLB_FLAG_ENCODE_SHIFT;
 
-pub const MFD_HUGE_SHIFT = HUGETLB_FLAG_ENCODE_SHIFT;
-pub const MFD_HUGE_MASK = HUGETLB_FLAG_ENCODE_MASK;
-pub const MFD_HUGE_64KB = HUGETLB_FLAG_ENCODE_64KB;
-pub const MFD_HUGE_512KB = HUGETLB_FLAG_ENCODE_512KB;
-pub const MFD_HUGE_1MB = HUGETLB_FLAG_ENCODE_1MB;
-pub const MFD_HUGE_2MB = HUGETLB_FLAG_ENCODE_2MB;
-pub const MFD_HUGE_8MB = HUGETLB_FLAG_ENCODE_8MB;
-pub const MFD_HUGE_16MB = HUGETLB_FLAG_ENCODE_16MB;
-pub const MFD_HUGE_32MB = HUGETLB_FLAG_ENCODE_32MB;
-pub const MFD_HUGE_256MB = HUGETLB_FLAG_ENCODE_256MB;
-pub const MFD_HUGE_512MB = HUGETLB_FLAG_ENCODE_512MB;
-pub const MFD_HUGE_1GB = HUGETLB_FLAG_ENCODE_1GB;
-pub const MFD_HUGE_2GB = HUGETLB_FLAG_ENCODE_2GB;
-pub const MFD_HUGE_16GB = HUGETLB_FLAG_ENCODE_16GB;
+pub const MFD = struct {
+    pub const CLOEXEC = 0x0001;
+    pub const ALLOW_SEALING = 0x0002;
+    pub const HUGETLB = 0x0004;
+    pub const ALL_FLAGS = CLOEXEC | ALLOW_SEALING | HUGETLB;
+
+    pub const HUGE_SHIFT = HUGETLB_FLAG_ENCODE_SHIFT;
+    pub const HUGE_MASK = HUGETLB_FLAG_ENCODE_MASK;
+    pub const HUGE_64KB = HUGETLB_FLAG_ENCODE_64KB;
+    pub const HUGE_512KB = HUGETLB_FLAG_ENCODE_512KB;
+    pub const HUGE_1MB = HUGETLB_FLAG_ENCODE_1MB;
+    pub const HUGE_2MB = HUGETLB_FLAG_ENCODE_2MB;
+    pub const HUGE_8MB = HUGETLB_FLAG_ENCODE_8MB;
+    pub const HUGE_16MB = HUGETLB_FLAG_ENCODE_16MB;
+    pub const HUGE_32MB = HUGETLB_FLAG_ENCODE_32MB;
+    pub const HUGE_256MB = HUGETLB_FLAG_ENCODE_256MB;
+    pub const HUGE_512MB = HUGETLB_FLAG_ENCODE_512MB;
+    pub const HUGE_1GB = HUGETLB_FLAG_ENCODE_1GB;
+    pub const HUGE_2GB = HUGETLB_FLAG_ENCODE_2GB;
+    pub const HUGE_16GB = HUGETLB_FLAG_ENCODE_16GB;
+};
 
 pub const rusage = extern struct {
     utime: timeval,
@@ -4051,7 +4110,7 @@ pub const V = switch (native_arch) {
         pub const LNEXT = 15;
         pub const DISCARD = 16;
     },
-    .sparc, .sparcv9 => struct {
+    .sparc, .sparc64 => struct {
         pub const INTR = 0;
         pub const QUIT = 1;
         pub const ERASE = 2;
@@ -4629,7 +4688,6 @@ pub const prctl_mm_map = extern struct {
 };
 
 pub const NETLINK = struct {
-
     /// Routing/device hook
     pub const ROUTE = 0;
 
@@ -5374,4 +5432,56 @@ pub const PERF = struct {
     };
 
     pub const IOC_FLAG_GROUP = 1;
+};
+
+// TODO: Add the rest of the AUDIT defines?
+pub const AUDIT = struct {
+    pub const ARCH = enum(u32) {
+        const @"64BIT" = 0x80000000;
+        const LE = 0x40000000;
+
+        pub const current: AUDIT.ARCH = switch (native_arch) {
+            .i386 => .I386,
+            .x86_64 => .X86_64,
+            .aarch64 => .AARCH64,
+            .arm, .thumb => .ARM,
+            .riscv64 => .RISCV64,
+            .sparc64 => .SPARC64,
+            .mips => .MIPS,
+            .mipsel => .MIPSEL,
+            .powerpc => .PPC,
+            .powerpc64 => .PPC64,
+            .powerpc64le => .PPC64LE,
+            else => @compileError("unsupported architecture"),
+        };
+
+        AARCH64 = toAudit(.aarch64),
+        ARM = toAudit(.arm),
+        ARMEB = toAudit(.armeb),
+        CSKY = toAudit(.csky),
+        HEXAGON = @enumToInt(std.elf.EM.HEXAGON),
+        I386 = toAudit(.i386),
+        M68K = toAudit(.m68k),
+        MIPS = toAudit(.mips),
+        MIPSEL = toAudit(.mips) | LE,
+        MIPS64 = toAudit(.mips64),
+        MIPSEL64 = toAudit(.mips64) | LE,
+        PPC = toAudit(.powerpc),
+        PPC64 = toAudit(.powerpc64),
+        PPC64LE = toAudit(.powerpc64le),
+        RISCV32 = toAudit(.riscv32),
+        RISCV64 = toAudit(.riscv64),
+        S390X = toAudit(.s390x),
+        SPARC = toAudit(.sparc),
+        SPARC64 = toAudit(.sparc64),
+        X86_64 = toAudit(.x86_64),
+
+        fn toAudit(arch: std.Target.Cpu.Arch) u32 {
+            var res: u32 = @enumToInt(arch.toElfMachine());
+            if (arch.endian() == .Little) res |= LE;
+            if (arch.ptrBitWidth() == 64) res |= @"64BIT";
+
+            return res;
+        }
+    };
 };

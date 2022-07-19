@@ -30,8 +30,8 @@ pub extern "c" fn _kern_get_current_team() i32;
 pub const sem_t = extern struct {
     type: i32,
     u: extern union {
-        named_sem_id: ?i32,
-        unnamed_sem: ?i32,
+        named_sem_id: i32,
+        unnamed_sem: i32,
     },
     padding: [2]i32,
 };
@@ -159,11 +159,11 @@ pub const dl_phdr_info = extern struct {
 };
 
 pub const Flock = extern struct {
-    l_type: c_short,
-    l_whence: c_short,
-    l_start: off_t,
-    l_len: off_t,
-    l_pid: pid_t,
+    type: c_short,
+    whence: c_short,
+    start: off_t,
+    len: off_t,
+    pid: pid_t,
 };
 
 pub const msghdr = extern struct {
@@ -226,7 +226,7 @@ pub const Stat = extern struct {
     pub fn ctime(self: @This()) timespec {
         return self.ctim;
     }
-    pub fn crtime(self: @This()) timespec {
+    pub fn birthtime(self: @This()) timespec {
         return self.crtim;
     }
 };
@@ -410,6 +410,12 @@ pub const MAP = struct {
     pub const NORESERVE = 0x10;
 };
 
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
+};
+
 pub const W = struct {
     pub const NOHANG = 0x1;
     pub const UNTRACED = 0x2;
@@ -457,9 +463,9 @@ pub const SA = struct {
 };
 
 pub const SIG = struct {
-    pub const ERR = @intToPtr(fn (i32) callconv(.C) void, maxInt(usize));
-    pub const DFL = @intToPtr(fn (i32) callconv(.C) void, 0);
-    pub const IGN = @intToPtr(fn (i32) callconv(.C) void, 1);
+    pub const ERR = @intToPtr(?Sigaction.handler_fn, maxInt(usize));
+    pub const DFL = @intToPtr(?Sigaction.handler_fn, 0);
+    pub const IGN = @intToPtr(?Sigaction.handler_fn, 1);
 
     pub const HUP = 1;
     pub const INT = 2;
@@ -732,9 +738,14 @@ const NSIG = 32;
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
+    pub const handler_fn = switch (builtin.zig_backend) {
+        .stage1 => fn (i32) callconv(.C) void,
+        else => *const fn (i32) callconv(.C) void,
+    };
+
     /// signal handler
     __sigaction_u: extern union {
-        __sa_handler: fn (i32) callconv(.C) void,
+        __sa_handler: handler_fn,
     },
 
     /// see signal options

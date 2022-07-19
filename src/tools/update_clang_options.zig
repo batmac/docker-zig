@@ -273,6 +273,10 @@ const known_options = [_]KnownOpt{
         .ident = "verbose",
     },
     .{
+        .name = "verbose",
+        .ident = "verbose",
+    },
+    .{
         .name = "L",
         .ident = "lib_dir",
     },
@@ -317,6 +321,14 @@ const known_options = [_]KnownOpt{
         .ident = "no_function_sections",
     },
     .{
+        .name = "fbuiltin",
+        .ident = "builtin",
+    },
+    .{
+        .name = "fno-builtin",
+        .ident = "no_builtin",
+    },
+    .{
         .name = "fcolor-diagnostics",
         .ident = "color_diagnostics",
     },
@@ -331,6 +343,14 @@ const known_options = [_]KnownOpt{
     .{
         .name = "fno-caret-diagnostics",
         .ident = "no_color_diagnostics",
+    },
+    .{
+        .name = "fstack-check",
+        .ident = "stack_check",
+    },
+    .{
+        .name = "fno-stack-check",
+        .ident = "no_stack_check",
     },
     .{
         .name = "MD",
@@ -423,6 +443,30 @@ const known_options = [_]KnownOpt{
     .{
         .name = "e",
         .ident = "entry",
+    },
+    .{
+        .name = "weak-l",
+        .ident = "weak_library",
+    },
+    .{
+        .name = "weak_library",
+        .ident = "weak_library",
+    },
+    .{
+        .name = "weak_framework",
+        .ident = "weak_framework",
+    },
+    .{
+        .name = "headerpad_max_install_names",
+        .ident = "headerpad_max_install_names",
+    },
+    .{
+        .name = "compress-debug-sections",
+        .ident = "compress_debug_sections",
+    },
+    .{
+        .name = "compress-debug-sections=",
+        .ident = "compress_debug_sections",
     },
 };
 

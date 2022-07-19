@@ -81,7 +81,6 @@ pub fn hash(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
         .NoReturn,
         .Opaque,
         .Undefined,
-        .Void,
         .Null,
         .ComptimeFloat,
         .ComptimeInt,
@@ -90,6 +89,8 @@ pub fn hash(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
         .Frame,
         .Float,
         => @compileError("unable to hash type " ++ @typeName(Key)),
+
+        .Void => return,
 
         // Help the optimizer see that hashing an int is easy by inlining!
         // TODO Check if the situation is better after #561 is resolved.
@@ -232,7 +233,7 @@ fn testHashDeepRecursive(key: anytype) u64 {
 
 test "typeContainsSlice" {
     comptime {
-        try testing.expect(!typeContainsSlice(meta.Tag(std.builtin.TypeInfo)));
+        try testing.expect(!typeContainsSlice(meta.Tag(std.builtin.Type)));
 
         try testing.expect(typeContainsSlice([]const u8));
         try testing.expect(!typeContainsSlice(u8));

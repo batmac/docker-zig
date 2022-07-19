@@ -9,6 +9,7 @@ const fs = std.fs;
 const allocPrint = std.fmt.allocPrint;
 const mem = std.mem;
 
+const lldMain = @import("../main.zig").lldMain;
 const trace = @import("../tracy.zig").trace;
 const Module = @import("../Module.zig");
 const Compilation = @import("../Compilation.zig");
@@ -20,6 +21,7 @@ const mingw = @import("../mingw.zig");
 const Air = @import("../Air.zig");
 const Liveness = @import("../Liveness.zig");
 const LlvmObject = @import("../codegen/llvm.zig").Object;
+const TypedValue = @import("../TypedValue.zig");
 
 const allocation_padding = 4 / 3;
 const minimum_text_block_size = 64 * allocation_padding;
@@ -129,23 +131,17 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
     assert(options.object_format == .coff);
 
     if (build_options.have_llvm and options.use_llvm) {
-        const self = try createEmpty(allocator, options);
-        errdefer self.base.destroy();
-
-        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
-        return self;
+        return createEmpty(allocator, options);
     }
+
+    const self = try createEmpty(allocator, options);
+    errdefer self.base.destroy();
 
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{
         .truncate = false,
         .read = true,
         .mode = link.determineMode(options),
     });
-    errdefer file.close();
-
-    const self = try createEmpty(allocator, options);
-    errdefer self.base.destroy();
-
     self.base.file = file;
 
     // TODO Write object specific relocations, COFF symbol table, then enable object file output.
@@ -403,6 +399,7 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Coff {
         else => return error.UnsupportedCOFFArchitecture,
     };
     const self = try gpa.create(Coff);
+    errdefer gpa.destroy(self);
     self.* = .{
         .base = .{
             .tag = .coff,
@@ -412,14 +409,21 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Coff {
         },
         .ptr_width = ptr_width,
     };
+
+    const use_llvm = build_options.have_llvm and options.use_llvm;
+    const use_stage1 = build_options.is_stage1 and options.use_stage1;
+    if (use_llvm and !use_stage1) {
+        self.llvm_object = try LlvmObject.create(gpa, options);
+    }
     return self;
 }
 
-pub fn allocateDeclIndexes(self: *Coff, decl: *Module.Decl) !void {
+pub fn allocateDeclIndexes(self: *Coff, decl_index: Module.Decl.Index) !void {
     if (self.llvm_object) |_| return;
 
     try self.offset_table.ensureUnusedCapacity(self.base.allocator, 1);
 
+    const decl = self.base.options.module.?.declPtr(decl_index);
     if (self.offset_table_free_list.popOrNull()) |i| {
         decl.link.coff.offset_table_index = i;
     } else {
@@ -671,7 +675,8 @@ pub fn updateFunc(self: *Coff, module: *Module, func: *Module.Fn, air: Air, live
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    const decl = func.owner_decl;
+    const decl_index = func.owner_decl;
+    const decl = module.declPtr(decl_index);
     const res = try codegen.generateFunction(
         &self.base,
         decl.srcLoc(),
@@ -685,7 +690,7 @@ pub fn updateFunc(self: *Coff, module: *Module, func: *Module.Fn, air: Air, live
         .appended => code_buffer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             return;
         },
     };
@@ -693,15 +698,25 @@ pub fn updateFunc(self: *Coff, module: *Module, func: *Module.Fn, air: Air, live
     return self.finishUpdateDecl(module, func.owner_decl, code);
 }
 
-pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
+pub fn lowerUnnamedConst(self: *Coff, tv: TypedValue, decl_index: Module.Decl.Index) !u32 {
+    _ = self;
+    _ = tv;
+    _ = decl_index;
+    log.debug("TODO lowerUnnamedConst for Coff", .{});
+    return error.AnalysisFail;
+}
+
+pub fn updateDecl(self: *Coff, module: *Module, decl_index: Module.Decl.Index) !void {
     if (build_options.skip_non_native and builtin.object_format != .coff) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl_index);
     }
     const tracy = trace(@src());
     defer tracy.end();
+
+    const decl = module.declPtr(decl_index);
 
     if (decl.val.tag() == .extern_fn) {
         return; // TODO Should we do more when front-end analyzed extern decl?
@@ -716,21 +731,24 @@ pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
     const res = try codegen.generateSymbol(&self.base, decl.srcLoc(), .{
         .ty = decl.ty,
         .val = decl.val,
-    }, &code_buffer, .none);
+    }, &code_buffer, .none, .{
+        .parent_atom_index = 0,
+    });
     const code = switch (res) {
         .externally_managed => |x| x,
         .appended => code_buffer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             return;
         },
     };
 
-    return self.finishUpdateDecl(module, decl, code);
+    return self.finishUpdateDecl(module, decl_index, code);
 }
 
-fn finishUpdateDecl(self: *Coff, module: *Module, decl: *Module.Decl, code: []const u8) !void {
+fn finishUpdateDecl(self: *Coff, module: *Module, decl_index: Module.Decl.Index, code: []const u8) !void {
+    const decl = module.declPtr(decl_index);
     const required_alignment = decl.ty.abiAlignment(self.base.options.target);
     const curr_size = decl.link.coff.size;
     if (curr_size != 0) {
@@ -738,7 +756,7 @@ fn finishUpdateDecl(self: *Coff, module: *Module, decl: *Module.Decl, code: []co
         const need_realloc = code.len > capacity or
             !mem.isAlignedGeneric(u32, decl.link.coff.text_offset, required_alignment);
         if (need_realloc) {
-            const curr_vaddr = self.getDeclVAddr(decl);
+            const curr_vaddr = self.text_section_virtual_address + decl.link.coff.text_offset;
             const vaddr = try self.growTextBlock(&decl.link.coff, code.len, required_alignment);
             log.debug("growing {s} from 0x{x} to 0x{x}\n", .{ decl.name, curr_vaddr, vaddr });
             if (vaddr != curr_vaddr) {
@@ -765,14 +783,17 @@ fn finishUpdateDecl(self: *Coff, module: *Module, decl: *Module.Decl, code: []co
     try self.base.file.?.pwriteAll(code, self.section_data_offset + self.offset_table_size + decl.link.coff.text_offset);
 
     // Since we updated the vaddr and the size, each corresponding export symbol also needs to be updated.
-    const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-    return self.updateDeclExports(module, decl, decl_exports);
+    const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+    return self.updateDeclExports(module, decl_index, decl_exports);
 }
 
-pub fn freeDecl(self: *Coff, decl: *Module.Decl) void {
+pub fn freeDecl(self: *Coff, decl_index: Module.Decl.Index) void {
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl_index);
     }
+
+    const mod = self.base.options.module.?;
+    const decl = mod.declPtr(decl_index);
 
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
     self.freeTextBlock(&decl.link.coff);
@@ -782,16 +803,47 @@ pub fn freeDecl(self: *Coff, decl: *Module.Decl) void {
 pub fn updateDeclExports(
     self: *Coff,
     module: *Module,
-    decl: *Module.Decl,
+    decl_index: Module.Decl.Index,
     exports: []const *Module.Export,
 ) !void {
     if (build_options.skip_non_native and builtin.object_format != .coff) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+
+    // Even in the case of LLVM, we need to notice certain exported symbols in order to
+    // detect the default subsystem.
+    for (exports) |exp| {
+        const exported_decl = module.declPtr(exp.exported_decl);
+        if (exported_decl.getFunction() == null) continue;
+        const winapi_cc = switch (self.base.options.target.cpu.arch) {
+            .i386 => std.builtin.CallingConvention.Stdcall,
+            else => std.builtin.CallingConvention.C,
+        };
+        const decl_cc = exported_decl.ty.fnCallingConvention();
+        if (decl_cc == .C and mem.eql(u8, exp.options.name, "main") and
+            self.base.options.link_libc)
+        {
+            module.stage1_flags.have_c_main = true;
+        } else if (decl_cc == winapi_cc and self.base.options.target.os.tag == .windows) {
+            if (mem.eql(u8, exp.options.name, "WinMain")) {
+                module.stage1_flags.have_winmain = true;
+            } else if (mem.eql(u8, exp.options.name, "wWinMain")) {
+                module.stage1_flags.have_wwinmain = true;
+            } else if (mem.eql(u8, exp.options.name, "WinMainCRTStartup")) {
+                module.stage1_flags.have_winmain_crt_startup = true;
+            } else if (mem.eql(u8, exp.options.name, "wWinMainCRTStartup")) {
+                module.stage1_flags.have_wwinmain_crt_startup = true;
+            } else if (mem.eql(u8, exp.options.name, "DllMainCRTStartup")) {
+                module.stage1_flags.have_dllmain_crt_startup = true;
+            }
+        }
     }
 
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl_index, exports);
+    }
+
+    const decl = module.declPtr(decl_index);
     for (exports) |exp| {
         if (exp.options.section) |section_name| {
             if (!mem.eql(u8, section_name, ".text")) {
@@ -816,27 +868,39 @@ pub fn updateDeclExports(
     }
 }
 
-pub fn flush(self: *Coff, comp: *Compilation) !void {
+pub fn flush(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Node) !void {
+    if (self.base.options.emit == null) {
+        if (build_options.have_llvm) {
+            if (self.llvm_object) |llvm_object| {
+                return try llvm_object.flushModule(comp, prog_node);
+            }
+        }
+        return;
+    }
     if (build_options.have_llvm and self.base.options.use_lld) {
-        return self.linkWithLLD(comp);
+        return self.linkWithLLD(comp, prog_node);
     } else {
         switch (self.base.options.effectiveOutputMode()) {
             .Exe, .Obj => {},
             .Lib => return error.TODOImplementWritingLibFiles,
         }
-        return self.flushModule(comp);
+        return self.flushModule(comp, prog_node);
     }
 }
 
-pub fn flushModule(self: *Coff, comp: *Compilation) !void {
+pub fn flushModule(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     if (build_options.have_llvm) {
         if (self.llvm_object) |llvm_object| {
-            return try llvm_object.flushModule(comp);
+            return try llvm_object.flushModule(comp, prog_node);
         }
     }
+
+    var sub_prog_node = prog_node.start("COFF Flush", 0);
+    sub_prog_node.activate();
+    defer sub_prog_node.end();
 
     if (self.text_section_size_dirty) {
         // Write the new raw size in the .text header
@@ -871,7 +935,7 @@ pub fn flushModule(self: *Coff, comp: *Compilation) !void {
     }
 }
 
-fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
+fn linkWithLLD(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -880,6 +944,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
     const arena = arena_allocator.allocator();
 
     const directory = self.base.options.emit.?.directory; // Just an alias to make it shorter to type.
+    const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
 
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
@@ -891,16 +956,30 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
                 .target = self.base.options.target,
                 .output_mode = .Obj,
             });
-            const o_directory = module.zig_cache_artifact_directory;
-            const full_obj_path = try o_directory.join(arena, &[_][]const u8{obj_basename});
-            break :blk full_obj_path;
+            switch (self.base.options.cache_mode) {
+                .incremental => break :blk try module.zig_cache_artifact_directory.join(
+                    arena,
+                    &[_][]const u8{obj_basename},
+                ),
+                .whole => break :blk try fs.path.join(arena, &.{
+                    fs.path.dirname(full_out_path).?, obj_basename,
+                }),
+            }
         }
 
-        try self.flushModule(comp);
-        const obj_basename = self.base.intermediary_basename.?;
-        const full_obj_path = try directory.join(arena, &[_][]const u8{obj_basename});
-        break :blk full_obj_path;
+        try self.flushModule(comp, prog_node);
+
+        if (fs.path.dirname(full_out_path)) |dirname| {
+            break :blk try fs.path.join(arena, &.{ dirname, self.base.intermediary_basename.? });
+        } else {
+            break :blk self.base.intermediary_basename.?;
+        }
     } else null;
+
+    var sub_prog_node = prog_node.start("LLD Link", 0);
+    sub_prog_node.activate();
+    sub_prog_node.context.refresh();
+    defer sub_prog_node.end();
 
     const is_lib = self.base.options.output_mode == .Lib;
     const is_dyn_lib = self.base.options.link_mode == .Dynamic and is_lib;
@@ -919,6 +998,8 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
     if (!self.base.options.disable_lld_caching) {
         man = comp.cache_parent.obtain();
         self.base.releaseLock();
+
+        comptime assert(Compilation.link_hash_implementation_version == 7);
 
         for (self.base.options.objects) |obj| {
             _ = try man.addFile(obj.path, null);
@@ -981,7 +1062,6 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         };
     }
 
-    const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
     if (self.base.options.output_mode == .Obj) {
         // LLD's COFF driver does not support the equivalent of `-r` so we do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
@@ -1064,17 +1144,6 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             try argv.append("-dynamicbase");
         }
 
-        const subsystem_suffix = ss: {
-            if (self.base.options.major_subsystem_version) |major| {
-                if (self.base.options.minor_subsystem_version) |minor| {
-                    break :ss try allocPrint(arena, ",{d}.{d}", .{ major, minor });
-                } else {
-                    break :ss try allocPrint(arena, ",{d}", .{major});
-                }
-            }
-            break :ss "";
-        };
-
         try argv.append(try allocPrint(arena, "-OUT:{s}", .{full_out_path}));
 
         if (self.base.options.implib_emit) |emit| {
@@ -1136,57 +1205,71 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             }
             break :blk null;
         };
+
         const Mode = enum { uefi, win32 };
         const mode: Mode = mode: {
-            if (resolved_subsystem) |subsystem| switch (subsystem) {
-                .Console => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:console{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .win32;
-                },
-                .EfiApplication => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_application{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .uefi;
-                },
-                .EfiBootServiceDriver => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_boot_service_driver{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .uefi;
-                },
-                .EfiRom => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_rom{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .uefi;
-                },
-                .EfiRuntimeDriver => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_runtime_driver{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .uefi;
-                },
-                .Native => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:native{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .win32;
-                },
-                .Posix => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:posix{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .win32;
-                },
-                .Windows => {
-                    try argv.append(try allocPrint(arena, "-SUBSYSTEM:windows{s}", .{
-                        subsystem_suffix,
-                    }));
-                    break :mode .win32;
-                },
+            if (resolved_subsystem) |subsystem| {
+                const subsystem_suffix = ss: {
+                    if (self.base.options.major_subsystem_version) |major| {
+                        if (self.base.options.minor_subsystem_version) |minor| {
+                            break :ss try allocPrint(arena, ",{d}.{d}", .{ major, minor });
+                        } else {
+                            break :ss try allocPrint(arena, ",{d}", .{major});
+                        }
+                    }
+                    break :ss "";
+                };
+
+                switch (subsystem) {
+                    .Console => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:console{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .win32;
+                    },
+                    .EfiApplication => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_application{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .uefi;
+                    },
+                    .EfiBootServiceDriver => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_boot_service_driver{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .uefi;
+                    },
+                    .EfiRom => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_rom{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .uefi;
+                    },
+                    .EfiRuntimeDriver => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:efi_runtime_driver{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .uefi;
+                    },
+                    .Native => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:native{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .win32;
+                    },
+                    .Posix => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:posix{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .win32;
+                    },
+                    .Windows => {
+                        try argv.append(try allocPrint(arena, "-SUBSYSTEM:windows{s}", .{
+                            subsystem_suffix,
+                        }));
+                        break :mode .win32;
+                    },
+                }
             } else if (target.os.tag == .uefi) {
                 break :mode .uefi;
             } else {
@@ -1304,7 +1387,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             }
             // MSVC compiler_rt is missing some stuff, so we build it unconditionally but
             // and rely on weak linkage to allow MSVC compiler_rt functions to override ours.
-            if (comp.compiler_rt_static_lib) |lib| {
+            if (comp.compiler_rt_lib) |lib| {
                 try argv.append(lib.full_object_path);
             }
         }
@@ -1336,60 +1419,69 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             Compilation.dump_argv(argv.items[1..]);
         }
 
-        // Sadly, we must run LLD as a child process because it does not behave
-        // properly as a library.
-        const child = try std.ChildProcess.init(argv.items, arena);
-        defer child.deinit();
+        if (std.process.can_spawn) {
+            // If possible, we run LLD as a child process because it does not always
+            // behave properly as a library, unfortunately.
+            // https://github.com/ziglang/zig/issues/3825
+            var child = std.ChildProcess.init(argv.items, arena);
+            if (comp.clang_passthrough_mode) {
+                child.stdin_behavior = .Inherit;
+                child.stdout_behavior = .Inherit;
+                child.stderr_behavior = .Inherit;
 
-        if (comp.clang_passthrough_mode) {
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
+                const term = child.spawnAndWait() catch |err| {
+                    log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                    return error.UnableToSpawnSelf;
+                };
+                switch (term) {
+                    .Exited => |code| {
+                        if (code != 0) {
+                            std.process.exit(code);
+                        }
+                    },
+                    else => std.process.abort(),
+                }
+            } else {
+                child.stdin_behavior = .Ignore;
+                child.stdout_behavior = .Ignore;
+                child.stderr_behavior = .Pipe;
 
-            const term = child.spawnAndWait() catch |err| {
-                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
-                return error.UnableToSpawnSelf;
-            };
-            switch (term) {
-                .Exited => |code| {
-                    if (code != 0) {
-                        // TODO https://github.com/ziglang/zig/issues/6342
-                        std.process.exit(1);
-                    }
-                },
-                else => std.process.abort(),
+                try child.spawn();
+
+                const stderr = try child.stderr.?.reader().readAllAlloc(arena, 10 * 1024 * 1024);
+
+                const term = child.wait() catch |err| {
+                    log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                    return error.UnableToSpawnSelf;
+                };
+
+                switch (term) {
+                    .Exited => |code| {
+                        if (code != 0) {
+                            // TODO parse this output and surface with the Compilation API rather than
+                            // directly outputting to stderr here.
+                            std.debug.print("{s}", .{stderr});
+                            return error.LLDReportedFailure;
+                        }
+                    },
+                    else => {
+                        log.err("{s} terminated with stderr:\n{s}", .{ argv.items[0], stderr });
+                        return error.LLDCrashed;
+                    },
+                }
+
+                if (stderr.len != 0) {
+                    log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+                }
             }
         } else {
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Ignore;
-            child.stderr_behavior = .Pipe;
-
-            try child.spawn();
-
-            const stderr = try child.stderr.?.reader().readAllAlloc(arena, 10 * 1024 * 1024);
-
-            const term = child.wait() catch |err| {
-                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
-                return error.UnableToSpawnSelf;
-            };
-
-            switch (term) {
-                .Exited => |code| {
-                    if (code != 0) {
-                        // TODO parse this output and surface with the Compilation API rather than
-                        // directly outputting to stderr here.
-                        std.debug.print("{s}", .{stderr});
-                        return error.LLDReportedFailure;
-                    }
-                },
-                else => {
-                    log.err("{s} terminated with stderr:\n{s}", .{ argv.items[0], stderr });
-                    return error.LLDCrashed;
-                },
-            }
-
-            if (stderr.len != 0) {
-                log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+            const exit_code = try lldMain(arena, argv.items, false);
+            if (exit_code != 0) {
+                if (comp.clang_passthrough_mode) {
+                    std.process.exit(exit_code);
+                } else {
+                    return error.LLDReportedFailure;
+                }
             }
         }
     }
@@ -1422,7 +1514,14 @@ fn findLib(self: *Coff, arena: Allocator, name: []const u8) !?[]const u8 {
     return null;
 }
 
-pub fn getDeclVAddr(self: *Coff, decl: *const Module.Decl) u64 {
+pub fn getDeclVAddr(
+    self: *Coff,
+    decl_index: Module.Decl.Index,
+    reloc_info: link.File.RelocInfo,
+) !u64 {
+    _ = reloc_info;
+    const mod = self.base.options.module.?;
+    const decl = mod.declPtr(decl_index);
     assert(self.llvm_object == null);
     return self.text_section_virtual_address + decl.link.coff.text_offset;
 }

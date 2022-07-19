@@ -83,7 +83,9 @@ enum CallingConvention {
     CallingConventionAPCS,
     CallingConventionAAPCS,
     CallingConventionAAPCSVFP,
-    CallingConventionSysV
+    CallingConventionSysV,
+    CallingConventionWin64,
+    CallingConventionPtxKernel
 };
 
 // Stage 1 supports only the generic address space
@@ -516,6 +518,7 @@ struct ZigValue {
         float16_t x_f16;
         float x_f32;
         double x_f64;
+        extFloat80_t x_f80;
         float128_t x_f128;
         bool x_bool;
         ConstBoundFnValue x_bound_fn;
@@ -1396,6 +1399,7 @@ enum StructSpecial {
 struct ZigTypeStruct {
     AstNode *decl_node;
     TypeStructField **fields;
+    TypeStructField *misaligned_field;
     ScopeDecls *decls_scope;
     HashMap<Buf *, TypeStructField *, buf_hash, buf_eql_buf> fields_by_name;
     RootStruct *root_struct;
@@ -1712,9 +1716,12 @@ struct ZigFn {
 
     bool calls_or_awaits_errorable_fn;
     bool is_cold;
-    bool is_test;
     bool is_noinline;
 };
+
+static inline bool fn_is_test(const ZigFn *fn) {
+    return fn->proto_node->type == NodeTypeTestDecl;
+}
 
 uint32_t fn_table_entry_hash(ZigFn*);
 bool fn_table_entry_eql(ZigFn *a, ZigFn *b);
@@ -1762,6 +1769,7 @@ enum BuiltinFnId {
     BuiltinFnIdSqrt,
     BuiltinFnIdSin,
     BuiltinFnIdCos,
+    BuiltinFnIdTan,
     BuiltinFnIdExp,
     BuiltinFnIdExp2,
     BuiltinFnIdLog,
@@ -2089,6 +2097,7 @@ struct CodeGen {
         ZigType *entry_f16;
         ZigType *entry_f32;
         ZigType *entry_f64;
+        ZigType *entry_f80;
         ZigType *entry_f128;
         ZigType *entry_void;
         ZigType *entry_unreachable;
@@ -2103,6 +2112,7 @@ struct CodeGen {
         ZigType *entry_global_error_set;
         ZigType *entry_enum_literal;
         ZigType *entry_any_frame;
+        ZigType *entry_opt_ptr_const_anyopaque;
     } builtin_types;
 
     struct Intern {
@@ -2135,7 +2145,6 @@ struct CodeGen {
     Buf docs_output_path;
 
     Buf *builtin_zig_path;
-    Buf *zig_std_special_dir; // Cannot be overridden; derived from zig_lib_dir.
 
     Stage1ZirInst *invalid_inst_src;
     Stage1AirInst *invalid_inst_gen;

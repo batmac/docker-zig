@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const expect = std.testing.expect;
 
 test "truncate u0 to larger integer allowed and has comptime known result" {
@@ -56,4 +57,27 @@ test "truncate on comptime integer" {
     try expect(z == -1);
     var w = @truncate(u1, 1 << 100);
     try expect(w == 0);
+}
+
+test "truncate on vectors" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails the comptime test
+        return error.SkipZigTest;
+    }
+
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            var v1: @Vector(4, u16) = .{ 0xaabb, 0xccdd, 0xeeff, 0x1122 };
+            var v2 = @truncate(u8, v1);
+            try expect(std.mem.eql(u8, &@as([4]u8, v2), &[4]u8{ 0xbb, 0xdd, 0xff, 0x22 }));
+        }
+    };
+    comptime try S.doTheTest();
+    try S.doTheTest();
 }

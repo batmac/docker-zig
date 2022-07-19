@@ -37,8 +37,9 @@ pub const StringContext = struct {
         _ = self;
         return hashString(s);
     }
-    pub fn eql(self: @This(), a: []const u8, b: []const u8) bool {
+    pub fn eql(self: @This(), a: []const u8, b: []const u8, b_index: usize) bool {
         _ = self;
+        _ = b_index;
         return eqlString(a, b);
     }
 };
@@ -65,18 +66,17 @@ pub fn hashString(s: []const u8) u32 {
 /// the alternative `std.HashMap`.
 /// Context must be a struct type with two member functions:
 ///   hash(self, K) u32
-///   eql(self, K, K) bool
+///   eql(self, K, K, usize) bool
 /// Adapted variants of many functions are provided.  These variants
 /// take a pseudo key instead of a key.  Their context must have the functions:
 ///   hash(self, PseudoKey) u32
-///   eql(self, PseudoKey, K) bool
+///   eql(self, PseudoKey, K, usize) bool
 pub fn ArrayHashMap(
     comptime K: type,
     comptime V: type,
     comptime Context: type,
     comptime store_hash: bool,
 ) type {
-    comptime std.hash_map.verifyContext(Context, K, K, u32);
     return struct {
         unmanaged: Unmanaged,
         allocator: Allocator,
@@ -181,7 +181,7 @@ pub fn ArrayHashMap(
             return self.unmanaged.getOrPutContext(self.allocator, key, self.ctx);
         }
         pub fn getOrPutAdapted(self: *Self, key: anytype, ctx: anytype) !GetOrPutResult {
-            return self.unmanaged.getOrPutContextAdapted(key, ctx, self.ctx);
+            return self.unmanaged.getOrPutContextAdapted(self.allocator, key, ctx, self.ctx);
         }
 
         /// If there is an existing item with `key`, then the result
@@ -407,6 +407,13 @@ pub fn ArrayHashMap(
             return self.unmanaged.reIndexContext(self.allocator, self.ctx);
         }
 
+        /// Sorts the entries and then rebuilds the index.
+        /// `sort_ctx` must have this method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub fn sort(self: *Self, sort_ctx: anytype) void {
+            return self.unmanaged.sortContext(sort_ctx, self.ctx);
+        }
+
         /// Shrinks the underlying `Entry` array to `new_len` elements and discards any associated
         /// index entries. Keeps capacity the same.
         pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
@@ -462,7 +469,6 @@ pub fn ArrayHashMapUnmanaged(
     comptime Context: type,
     comptime store_hash: bool,
 ) type {
-    comptime std.hash_map.verifyContext(Context, K, K, u32);
     return struct {
         /// It is permitted to access this field directly.
         entries: DataList = .{},
@@ -472,6 +478,10 @@ pub fn ArrayHashMapUnmanaged(
         /// an IndexHeader followed by an array of Index(I) structs, where I is defined
         /// by how many total indexes there are.
         index_header: ?*IndexHeader = null,
+
+        comptime {
+            std.hash_map.verifyContext(Context, K, K, u32, true);
+        }
 
         /// Modifying the key is allowed only if it does not change the hash.
         /// Modifying the value is allowed.
@@ -700,7 +710,7 @@ pub fn ArrayHashMapUnmanaged(
                 const hashes_array = slice.items(.hash);
                 const keys_array = slice.items(.key);
                 for (keys_array) |*item_key, i| {
-                    if (hashes_array[i] == h and checkedEql(ctx, key, item_key.*)) {
+                    if (hashes_array[i] == h and checkedEql(ctx, key, item_key.*, i)) {
                         return GetOrPutResult{
                             .key_ptr = item_key,
                             // workaround for #6974
@@ -784,7 +794,7 @@ pub fn ArrayHashMapUnmanaged(
             allocator: Allocator,
             additional_capacity: usize,
         ) !void {
-            if (@sizeOf(ByIndexContext) != 0)
+            if (@sizeOf(Context) != 0)
                 @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call ensureTotalCapacityContext instead.");
             return self.ensureUnusedCapacityContext(allocator, additional_capacity, undefined);
         }
@@ -933,7 +943,7 @@ pub fn ArrayHashMapUnmanaged(
                 const hashes_array = slice.items(.hash);
                 const keys_array = slice.items(.key);
                 for (keys_array) |*item_key, i| {
-                    if (hashes_array[i] == h and checkedEql(ctx, key, item_key.*)) {
+                    if (hashes_array[i] == h and checkedEql(ctx, key, item_key.*, i)) {
                         return i;
                     }
                 }
@@ -1168,6 +1178,22 @@ pub fn ArrayHashMapUnmanaged(
             self.index_header = new_header;
         }
 
+        /// Sorts the entries and then rebuilds the index.
+        /// `sort_ctx` must have this method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub inline fn sort(self: *Self, sort_ctx: anytype) void {
+            if (@sizeOf(ByIndexContext) != 0)
+                @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call sortContext instead.");
+            return self.sortContext(sort_ctx, undefined);
+        }
+
+        pub fn sortContext(self: *Self, sort_ctx: anytype, ctx: Context) void {
+            self.entries.sort(sort_ctx);
+            const header = self.index_header orelse return;
+            header.reset();
+            self.insertAllEntriesIntoNewHeader(if (store_hash) {} else ctx, header);
+        }
+
         /// Shrinks the underlying `Entry` array to `new_len` elements and discards any associated
         /// index entries. Keeps capacity the same.
         pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
@@ -1245,7 +1271,7 @@ pub fn ArrayHashMapUnmanaged(
                 const keys_array = slice.items(.key);
                 for (keys_array) |*item_key, i| {
                     const hash_match = if (store_hash) hashes_array[i] == key_hash else true;
-                    if (hash_match and key_ctx.eql(key, item_key.*)) {
+                    if (hash_match and key_ctx.eql(key, item_key.*, i)) {
                         const removed_entry: KV = .{
                             .key = keys_array[i],
                             .value = slice.items(.value)[i],
@@ -1286,7 +1312,7 @@ pub fn ArrayHashMapUnmanaged(
                 const keys_array = slice.items(.key);
                 for (keys_array) |*item_key, i| {
                     const hash_match = if (store_hash) hashes_array[i] == key_hash else true;
-                    if (hash_match and key_ctx.eql(key, item_key.*)) {
+                    if (hash_match and key_ctx.eql(key, item_key.*, i)) {
                         switch (removal_type) {
                             .swap => self.entries.swapRemove(i),
                             .ordered => self.entries.orderedRemove(i),
@@ -1483,8 +1509,9 @@ pub fn ArrayHashMapUnmanaged(
 
                 // This pointer survives the following append because we call
                 // entries.ensureTotalCapacity before getOrPutInternal.
-                const hash_match = if (store_hash) h == hashes_array[slot_data.entry_index] else true;
-                if (hash_match and checkedEql(ctx, key, keys_array[slot_data.entry_index])) {
+                const i = slot_data.entry_index;
+                const hash_match = if (store_hash) h == hashes_array[i] else true;
+                if (hash_match and checkedEql(ctx, key, keys_array[i], i)) {
                     return .{
                         .found_existing = true,
                         .key_ptr = &keys_array[slot_data.entry_index],
@@ -1571,8 +1598,9 @@ pub fn ArrayHashMapUnmanaged(
                 if (slot_data.isEmpty() or slot_data.distance_from_start_index < distance_from_start_index)
                     return null;
 
-                const hash_match = if (store_hash) h == hashes_array[slot_data.entry_index] else true;
-                if (hash_match and checkedEql(ctx, key, keys_array[slot_data.entry_index]))
+                const i = slot_data.entry_index;
+                const hash_match = if (store_hash) h == hashes_array[i] else true;
+                if (hash_match and checkedEql(ctx, key, keys_array[i], i))
                     return slot;
             }
             unreachable;
@@ -1624,7 +1652,7 @@ pub fn ArrayHashMapUnmanaged(
         }
 
         inline fn checkedHash(ctx: anytype, key: anytype) u32 {
-            comptime std.hash_map.verifyContext(@TypeOf(ctx), @TypeOf(key), K, u32);
+            comptime std.hash_map.verifyContext(@TypeOf(ctx), @TypeOf(key), K, u32, true);
             // If you get a compile error on the next line, it means that
             const hash = ctx.hash(key); // your generic hash function doesn't accept your key
             if (@TypeOf(hash) != u32) {
@@ -1633,10 +1661,10 @@ pub fn ArrayHashMapUnmanaged(
             }
             return hash;
         }
-        inline fn checkedEql(ctx: anytype, a: anytype, b: K) bool {
-            comptime std.hash_map.verifyContext(@TypeOf(ctx), @TypeOf(a), K, u32);
+        inline fn checkedEql(ctx: anytype, a: anytype, b: K, b_index: usize) bool {
+            comptime std.hash_map.verifyContext(@TypeOf(ctx), @TypeOf(a), K, u32, true);
             // If you get a compile error on the next line, it means that
-            const eql = ctx.eql(a, b); // your generic eql function doesn't accept (self, adapt key, K)
+            const eql = ctx.eql(a, b, b_index); // your generic eql function doesn't accept (self, adapt key, K, index)
             if (@TypeOf(eql) != bool) {
                 @compileError("Context " ++ @typeName(@TypeOf(ctx)) ++ " has a generic eql function that returns the wrong type!\n" ++
                     @typeName(bool) ++ " was expected, but found " ++ @typeName(@TypeOf(eql)));
@@ -1863,6 +1891,14 @@ const IndexHeader = struct {
         const ptr = @ptrCast([*]align(@alignOf(IndexHeader)) u8, header);
         const slice = ptr[0 .. @sizeOf(IndexHeader) + header.length() * index_size];
         allocator.free(slice);
+    }
+
+    /// Puts an IndexHeader into the state that it would be in after being freshly allocated.
+    fn reset(header: *IndexHeader) void {
+        const index_size = hash_map.capacityIndexSize(header.bit_index);
+        const ptr = @ptrCast([*]align(@alignOf(IndexHeader)) u8, header);
+        const nbytes = @sizeOf(IndexHeader) + header.length() * index_size;
+        @memset(ptr + @sizeOf(IndexHeader), 0xff, nbytes - @sizeOf(IndexHeader));
     }
 
     // Verify that the header has sufficient alignment to produce aligned arrays.
@@ -2215,6 +2251,32 @@ test "auto store_hash" {
     try testing.expect(meta.fieldInfo(HasExpensiveEqlUn.Data, .hash).field_type != void);
 }
 
+test "sort" {
+    var map = AutoArrayHashMap(i32, i32).init(std.testing.allocator);
+    defer map.deinit();
+
+    for ([_]i32{ 8, 3, 12, 10, 2, 4, 9, 5, 6, 13, 14, 15, 16, 1, 11, 17, 7 }) |x| {
+        try map.put(x, x * 3);
+    }
+
+    const C = struct {
+        keys: []i32,
+
+        pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+            return ctx.keys[a_index] < ctx.keys[b_index];
+        }
+    };
+
+    map.sort(C{ .keys = map.keys() });
+
+    var x: i32 = 1;
+    for (map.keys()) |key, i| {
+        try testing.expect(key == x);
+        try testing.expect(map.values()[i] == x * 3);
+        x += 1;
+    }
+}
+
 pub fn getHashPtrAddrFn(comptime K: type, comptime Context: type) (fn (Context, K) u32) {
     return struct {
         fn hash(ctx: Context, key: K) u32 {
@@ -2255,9 +2317,10 @@ pub fn getAutoHashFn(comptime K: type, comptime Context: type) (fn (Context, K) 
     }.hash;
 }
 
-pub fn getAutoEqlFn(comptime K: type, comptime Context: type) (fn (Context, K, K) bool) {
+pub fn getAutoEqlFn(comptime K: type, comptime Context: type) (fn (Context, K, K, usize) bool) {
     return struct {
-        fn eql(ctx: Context, a: K, b: K) bool {
+        fn eql(ctx: Context, a: K, b: K, b_index: usize) bool {
+            _ = b_index;
             _ = ctx;
             return meta.eql(a, b);
         }

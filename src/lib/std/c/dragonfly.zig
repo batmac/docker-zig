@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("../std.zig");
 const maxInt = std.math.maxInt;
 const iovec = std.os.iovec;
@@ -12,7 +13,10 @@ pub extern "c" fn sigaltstack(ss: ?*stack_t, old_ss: ?*stack_t) c_int;
 pub extern "c" fn getrandom(buf_ptr: [*]u8, buf_len: usize, flags: c_uint) isize;
 pub extern "c" fn pipe2(fds: *[2]fd_t, flags: u32) c_int;
 
-pub const dl_iterate_phdr_callback = fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int;
+pub const dl_iterate_phdr_callback = switch (builtin.zig_backend) {
+    .stage1 => fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int,
+    else => *const fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int,
+};
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*anyopaque) c_int;
 
 pub extern "c" fn lwp_gettid() c_int;
@@ -35,6 +39,9 @@ pub const sem_t = ?*opaque {};
 
 pub extern "c" fn pthread_setname_np(thread: std.c.pthread_t, name: [*:0]const u8) E;
 pub extern "c" fn pthread_getname_np(thread: std.c.pthread_t, name: [*:0]u8, len: usize) E;
+
+pub extern "c" fn umtx_sleep(ptr: *const volatile c_int, value: c_int, timeout: c_int) c_int;
+pub extern "c" fn umtx_wakeup(ptr: *const volatile c_int, count: c_int) c_int;
 
 // See:
 // - https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/include/unistd.h
@@ -183,6 +190,12 @@ pub const MAP = struct {
     pub const TRYFIXED = 65536;
     pub const NOCORE = 131072;
     pub const SIZEALIGN = 262144;
+};
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
 };
 
 pub const W = struct {
@@ -670,8 +683,14 @@ pub const empty_sigset = sigset_t{ .__bits = [_]c_uint{0} ** _SIG_WORDS };
 pub const sig_atomic_t = c_int;
 
 pub const Sigaction = extern struct {
-    pub const handler_fn = fn (c_int) callconv(.C) void;
-    pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = switch (builtin.zig_backend) {
+        .stage1 => fn (c_int) callconv(.C) void,
+        else => *const fn (c_int) callconv(.C) void,
+    };
+    pub const sigaction_fn = switch (builtin.zig_backend) {
+        .stage1 => fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void,
+        else => *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void,
+    };
 
     /// signal handler
     handler: extern union {
@@ -923,11 +942,11 @@ pub const LOCK = struct {
 };
 
 pub const Flock = extern struct {
-    l_start: off_t,
-    l_len: off_t,
-    l_pid: pid_t,
-    l_type: c_short,
-    l_whence: c_short,
+    start: off_t,
+    len: off_t,
+    pid: pid_t,
+    type: c_short,
+    whence: c_short,
 };
 
 pub const addrinfo = extern struct {

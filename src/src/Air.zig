@@ -7,7 +7,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
-const Module = @import("Module.zig");
 const assert = std.debug.assert;
 const Air = @This();
 
@@ -32,8 +31,7 @@ pub const Inst = struct {
         /// The first N instructions in the main block must be one arg instruction per
         /// function parameter. This makes function parameters participate in
         /// liveness analysis without any special handling.
-        /// Uses the `ty_str` field.
-        /// The string is the parameter name.
+        /// Uses the `ty` field.
         arg,
         /// Float or integer addition. For integers, wrapping is undefined behavior.
         /// Both operands are guaranteed to be the same type, and the result type
@@ -115,13 +113,13 @@ pub const Inst = struct {
         /// The offset is in element type units, not bytes.
         /// Wrapping is undefined behavior.
         /// The lhs is the pointer, rhs is the offset. Result type is the same as lhs.
-        /// Uses the `bin_op` field.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         ptr_add,
         /// Subtract an offset from a pointer, returning a new pointer.
         /// The offset is in element type units, not bytes.
         /// Wrapping is undefined behavior.
         /// The lhs is the pointer, rhs is the offset. Result type is the same as lhs.
-        /// Uses the `bin_op` field.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         ptr_sub,
         /// Given two operands which can be floats, integers, or vectors, returns the
         /// greater of the operands. For vectors it operates element-wise.
@@ -135,6 +133,26 @@ pub const Inst = struct {
         /// is the same as both operands.
         /// Uses the `bin_op` field.
         min,
+        /// Integer addition with overflow. Both operands are guaranteed to be the same type,
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
+        add_with_overflow,
+        /// Integer subtraction with overflow. Both operands are guaranteed to be the same type,
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
+        sub_with_overflow,
+        /// Integer multiplication with overflow. Both operands are guaranteed to be the same type,
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
+        mul_with_overflow,
+        /// Integer left-shift with overflow. Both operands are guaranteed to be the same type,
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
+        shl_with_overflow,
         /// Allocates stack local memory.
         /// Uses the `ty` field.
         alloc,
@@ -155,6 +173,9 @@ pub const Inst = struct {
         /// Shift right. `>>`
         /// Uses the `bin_op` field.
         shr,
+        /// Shift right. The shift produces a poison value if it shifts out any non-zero bits.
+        /// Uses the `bin_op` field.
+        shr_exact,
         /// Shift left. `<<`
         /// Uses the `bin_op` field.
         shl,
@@ -189,11 +210,23 @@ pub const Inst = struct {
         /// Lowers to a hardware trap instruction, or the next best thing.
         /// Result type is always void.
         breakpoint,
+        /// Yields the return address of the current function.
+        /// Uses the `no_op` field.
+        ret_addr,
+        /// Implements @frameAddress builtin.
+        /// Uses the `no_op` field.
+        frame_addr,
         /// Function call.
         /// Result type is the return type of the function being called.
         /// Uses the `pl_op` field with the `Call` payload. operand is the callee.
         /// Triggers `resolveTypeLayout` on the return type of the callee.
         call,
+        /// Same as `call` except with the `always_tail` attribute.
+        call_always_tail,
+        /// Same as `call` except with the `never_tail` attribute.
+        call_never_tail,
+        /// Same as `call` except with the `never_inline` attribute.
+        call_never_inline,
         /// Count leading zeroes of an integer according to its representation in twos complement.
         /// Result type will always be an unsigned integer big enough to fit the answer.
         /// Uses the `ty_op` field.
@@ -206,6 +239,60 @@ pub const Inst = struct {
         /// Result type will always be an unsigned integer big enough to fit the answer.
         /// Uses the `ty_op` field.
         popcount,
+        /// Reverse the bytes in an integer according to its representation in twos complement.
+        /// Uses the `ty_op` field.
+        byte_swap,
+        /// Reverse the bits in an integer according to its representation in twos complement.
+        /// Uses the `ty_op` field.
+        bit_reverse,
+
+        /// Square root of a floating point number.
+        /// Uses the `un_op` field.
+        sqrt,
+        /// Sine function on a floating point number.
+        /// Uses the `un_op` field.
+        sin,
+        /// Cosine function on a floating point number.
+        /// Uses the `un_op` field.
+        cos,
+        /// Tangent function on a floating point number.
+        /// Uses the `un_op` field.
+        tan,
+        /// Base e exponential of a floating point number.
+        /// Uses the `un_op` field.
+        exp,
+        /// Base 2 exponential of a floating point number.
+        /// Uses the `un_op` field.
+        exp2,
+        /// Natural (base e) logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log,
+        /// Base 2 logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log2,
+        /// Base 10 logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log10,
+        /// Aboslute value of a floating point number.
+        /// Uses the `un_op` field.
+        fabs,
+        /// Floor: rounds a floating pointer number down to the nearest integer.
+        /// Uses the `un_op` field.
+        floor,
+        /// Ceiling: rounds a floating pointer number up to the nearest integer.
+        /// Uses the `un_op` field.
+        ceil,
+        /// Rounds a floating pointer number to the nearest integer.
+        /// Uses the `un_op` field.
+        round,
+        /// Rounds a floating pointer number to the nearest integer towards zero.
+        /// Uses the `un_op` field.
+        trunc_float,
+        /// Float negation. This affects the sign of zero, inf, and NaN, which is impossible
+        /// to do with sub. Integers are not allowed and must be represented with sub with
+        /// LHS of zero.
+        /// Uses the `un_op` field.
+        neg,
 
         /// `<`. Result type is always bool.
         /// Uses the `bin_op` field.
@@ -225,6 +312,10 @@ pub const Inst = struct {
         /// `!=`. Result type is always bool.
         /// Uses the `bin_op` field.
         cmp_neq,
+        /// Conditional between two vectors.
+        /// Result type is always a vector of bools.
+        /// Uses the `ty_pl` field, payload is `VectorCmp`.
+        cmp_vector,
 
         /// Conditional branch.
         /// Result type is always noreturn; no instructions in a block follow this one.
@@ -234,6 +325,20 @@ pub const Inst = struct {
         /// Result type is always noreturn; no instructions in a block follow this one.
         /// Uses the `pl_op` field. Operand is the condition. Payload is `SwitchBr`.
         switch_br,
+        /// Given an operand which is an error union, splits control flow. In
+        /// case of error, control flow goes into the block that is part of this
+        /// instruction, which is guaranteed to end with a return instruction
+        /// and never breaks out of the block.
+        /// In the case of non-error, control flow proceeds to the next instruction
+        /// after the `try`, with the result of this instruction being the unwrapped
+        /// payload value, as if `unwrap_errunion_payload` was executed on the operand.
+        /// Uses the `pl_op` field. Payload is `Try`.
+        @"try",
+        /// Same as `try` except the operand is a pointer to an error union, and the
+        /// result is a pointer to the payload. Result is as if `unwrap_errunion_payload_ptr`
+        /// was executed on the operand.
+        /// Uses the `ty_pl` field. Payload is `TryPtr`.
+        try_ptr,
         /// A comptime-known value. Uses the `ty_pl` field, payload is index of
         /// `values` array.
         constant,
@@ -243,6 +348,25 @@ pub const Inst = struct {
         /// Result type is always void.
         /// Uses the `dbg_stmt` field.
         dbg_stmt,
+        /// Marks the beginning of a semantic scope for debug info variables.
+        dbg_block_begin,
+        /// Marks the end of a semantic scope for debug info variables.
+        dbg_block_end,
+        /// Marks the start of an inline call.
+        /// Uses `ty_pl` with the payload being the index of a Value.Function in air.values.
+        dbg_inline_begin,
+        /// Marks the end of an inline call.
+        /// Uses `ty_pl` with the payload being the index of a Value.Function in air.values.
+        dbg_inline_end,
+        /// Marks the beginning of a local variable. The operand is a pointer pointing
+        /// to the storage for the variable. The local may be a const or a var.
+        /// Result type is always void.
+        /// Uses `pl_op`. The payload index is the variable name. It points to the extra
+        /// array, reinterpreting the bytes there as a null-terminated string.
+        dbg_var_ptr,
+        /// Same as `dbg_var_ptr` except the local is a const, not a var, and the
+        /// operand is the local's value.
+        dbg_var_val,
         /// ?T => bool
         /// Result type is always bool.
         /// Uses the `un_op` field.
@@ -354,6 +478,9 @@ pub const Inst = struct {
         /// *(E!T) -> E. If the value is not an error, undefined behavior.
         /// Uses the `ty_op` field.
         unwrap_errunion_err_ptr,
+        /// *(E!T) => *T. Sets the value to non-error with an undefined payload value.
+        /// Uses the `ty_op` field.
+        errunion_payload_ptr_set,
         /// wrap from T to E!T
         /// Uses the `ty_op` field.
         wrap_errunion_payload,
@@ -399,7 +526,8 @@ pub const Inst = struct {
         /// Given a pointer to a slice, return a pointer to the pointer of the slice.
         /// Uses the `ty_op` field.
         ptr_slice_ptr_ptr,
-        /// Given an array value and element index, return the element value at that index.
+        /// Given an (array value or vector value) and element index,
+        /// return the element value at that index.
         /// Result type is the element type of the array operand.
         /// Uses the `bin_op` field.
         array_elem_val,
@@ -428,6 +556,24 @@ pub const Inst = struct {
         /// Given an integer operand, return the float with the closest mathematical meaning.
         /// Uses the `ty_op` field.
         int_to_float,
+
+        /// Transforms a vector into a scalar value by performing a sequential
+        /// horizontal reduction of its elements using the specified operator.
+        /// The vector element type (and hence result type) will be:
+        ///  * and, or, xor       => integer or boolean
+        ///  * min, max, add, mul => integer or float
+        /// Uses the `reduce` field.
+        reduce,
+        /// Given an integer, bool, float, or pointer operand, return a vector with all elements
+        /// equal to the scalar value.
+        /// Uses the `ty_op` field.
+        splat,
+        /// Constructs a vector by selecting elements from `a` and `b` based on `mask`.
+        /// Uses the `ty_pl` field with payload `Shuffle`.
+        shuffle,
+        /// Constructs a vector element-wise from `a` or `b` based on `pred`.
+        /// Uses the `pl_op` field with `pred` as operand, and payload `Bin`.
+        select,
 
         /// Given dest ptr, value, and len, set all elements at dest to value.
         /// Result type is always void.
@@ -469,6 +615,67 @@ pub const Inst = struct {
         /// Uses the `pl_op` field with payload `AtomicRmw`. Operand is `ptr`.
         atomic_rmw,
 
+        /// Given an enum tag value, returns the tag name. The enum type may be non-exhaustive.
+        /// Result type is always `[:0]const u8`.
+        /// Uses the `un_op` field.
+        tag_name,
+
+        /// Given an error value, return the error name. Result type is always `[:0] const u8`.
+        /// Uses the `un_op` field.
+        error_name,
+
+        /// Constructs a vector, tuple, struct, or array value out of runtime-known elements.
+        /// Some of the elements may be comptime-known.
+        /// Uses the `ty_pl` field, payload is index of an array of elements, each of which
+        /// is a `Ref`. Length of the array is given by the vector type.
+        /// If the type is an array with a sentinel, the AIR elements do not include it
+        /// explicitly.
+        aggregate_init,
+
+        /// Constructs a union from a field index and a runtime-known init value.
+        /// Uses the `ty_pl` field with payload `UnionInit`.
+        union_init,
+
+        /// Communicates an intent to load memory.
+        /// Result is always unused.
+        /// Uses the `prefetch` field.
+        prefetch,
+
+        /// Computes `(a * b) + c`, but only rounds once.
+        /// Uses the `pl_op` field with payload `Bin`.
+        /// The operand is the addend. The mulends are lhs and rhs.
+        mul_add,
+
+        /// Implements @fieldParentPtr builtin.
+        /// Uses the `ty_pl` field.
+        field_parent_ptr,
+
+        /// Implements @wasmMemorySize builtin.
+        /// Result type is always `u32`,
+        /// Uses the `pl_op` field, payload represents the index of the target memory.
+        /// The operand is unused and always set to `Ref.none`.
+        wasm_memory_size,
+
+        /// Implements @wasmMemoryGrow builtin.
+        /// Result type is always `i32`,
+        /// Uses the `pl_op` field, payload represents the index of the target memory.
+        wasm_memory_grow,
+
+        /// Returns `true` if and only if the operand, an integer with
+        /// the same size as the error integer type, is less than the
+        /// total number of errors in the Module.
+        /// Result type is always `bool`.
+        /// Uses the `un_op` field.
+        /// Note that the number of errors in the Module cannot be considered stable until
+        /// flush().
+        cmp_lt_errors_len,
+
+        /// Returns pointer to current error return trace.
+        err_return_trace,
+
+        /// Sets the operand as the current error return trace,
+        set_err_return_trace,
+
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
                 .lt => .cmp_lt,
@@ -504,6 +711,7 @@ pub const Inst = struct {
     pub const Data = union {
         no_op: void,
         un_op: Ref,
+
         bin_op: struct {
             lhs: Ref,
             rhs: Ref,
@@ -517,11 +725,6 @@ pub const Inst = struct {
             ty: Ref,
             // Index into a different array.
             payload: u32,
-        },
-        ty_str: struct {
-            ty: Ref,
-            // ZIR string table index.
-            str: u32,
         },
         br: struct {
             block_inst: Index,
@@ -539,6 +742,16 @@ pub const Inst = struct {
         atomic_load: struct {
             ptr: Ref,
             order: std.builtin.AtomicOrder,
+        },
+        prefetch: struct {
+            ptr: Ref,
+            rw: std.builtin.PrefetchOptions.Rw,
+            locality: u2,
+            cache: std.builtin.PrefetchOptions.Cache,
+        },
+        reduce: struct {
+            operand: Ref,
+            operation: std.builtin.ReduceOp,
         },
 
         // Make sure we don't accidentally add a field to make this union
@@ -586,6 +799,19 @@ pub const SwitchBr = struct {
     };
 };
 
+/// This data is stored inside extra. Trailing:
+/// 0. body: Inst.Index // for each body_len
+pub const Try = struct {
+    body_len: u32,
+};
+
+/// This data is stored inside extra. Trailing:
+/// 0. body: Inst.Index // for each body_len
+pub const TryPtr = struct {
+    ptr: Inst.Ref,
+    body_len: u32,
+};
+
 pub const StructField = struct {
     /// Whether this is a pointer or byval is determined by the AIR tag.
     struct_operand: Inst.Ref,
@@ -597,14 +823,59 @@ pub const Bin = struct {
     rhs: Inst.Ref,
 };
 
+pub const FieldParentPtr = struct {
+    field_ptr: Inst.Ref,
+    field_index: u32,
+};
+
+pub const Shuffle = struct {
+    a: Inst.Ref,
+    b: Inst.Ref,
+    // index to air_values
+    mask: u32,
+    mask_len: u32,
+};
+
+pub const VectorCmp = struct {
+    lhs: Inst.Ref,
+    rhs: Inst.Ref,
+    op: u32,
+
+    pub fn compareOperator(self: VectorCmp) std.math.CompareOperator {
+        return @intToEnum(std.math.CompareOperator, @truncate(u3, self.op));
+    }
+
+    pub fn encodeOp(compare_operator: std.math.CompareOperator) u32 {
+        return @enumToInt(compare_operator);
+    }
+};
+
 /// Trailing:
 /// 0. `Inst.Ref` for every outputs_len
 /// 1. `Inst.Ref` for every inputs_len
+/// 2. for every outputs_len
+///    - constraint: memory at this position is reinterpreted as a null
+///      terminated string.
+///    - name: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 3. for every inputs_len
+///    - constraint: memory at this position is reinterpreted as a null
+///      terminated string.
+///    - name: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 4. for every clobbers_len
+///    - clobber_name: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 5. A number of u32 elements follow according to the equation `(source_len + 3) / 4`.
+///    Memory starting at this position is reinterpreted as the source bytes.
 pub const Asm = struct {
-    /// Index to the corresponding ZIR instruction.
-    /// `asm_source`, `outputs_len`, `inputs_len`, `clobbers_len`, `is_volatile`, and
-    /// clobbers are found via here.
-    zir_index: u32,
+    /// Length of the assembly source in bytes.
+    source_len: u32,
+    outputs_len: u32,
+    inputs_len: u32,
+    /// The MSB is `is_volatile`.
+    /// The rest of the bits are `clobbers_len`.
+    flags: u32,
 };
 
 pub const Cmpxchg = struct {
@@ -639,6 +910,11 @@ pub const AtomicRmw = struct {
     }
 };
 
+pub const UnionInit = struct {
+    field_index: u32,
+    init: Inst.Ref,
+};
+
 pub fn getMainBody(air: Air) []const Air.Inst.Index {
     const body_index = air.extra[@enumToInt(ExtraIndex.main_block)];
     const extra = air.extraData(Block, body_index);
@@ -656,8 +932,6 @@ pub fn typeOf(air: Air, inst: Air.Inst.Ref) Type {
 pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
     const datas = air.instructions.items(.data);
     switch (air.instructions.items(.tag)[inst]) {
-        .arg => return air.getRefType(datas[inst].ty_str.ty),
-
         .add,
         .addwrap,
         .add_sat,
@@ -676,15 +950,33 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .bit_and,
         .bit_or,
         .xor,
-        .ptr_add,
-        .ptr_sub,
         .shr,
+        .shr_exact,
         .shl,
         .shl_exact,
         .shl_sat,
         .min,
         .max,
+        .bool_and,
+        .bool_or,
         => return air.typeOf(datas[inst].bin_op.lhs),
+
+        .sqrt,
+        .sin,
+        .cos,
+        .tan,
+        .exp,
+        .exp2,
+        .log,
+        .log2,
+        .log10,
+        .fabs,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
+        .neg,
+        => return air.typeOf(datas[inst].un_op),
 
         .cmp_lt,
         .cmp_lte,
@@ -692,6 +984,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .cmp_gte,
         .cmp_gt,
         .cmp_neq,
+        .cmp_lt_errors_len,
         .is_null,
         .is_non_null,
         .is_null_ptr,
@@ -700,14 +993,14 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .is_non_err,
         .is_err_ptr,
         .is_non_err_ptr,
-        .bool_and,
-        .bool_or,
-        => return Type.initTag(.bool),
+        => return Type.bool,
 
-        .const_ty => return Type.initTag(.type),
+        .const_ty => return Type.type,
 
         .alloc,
         .ret_ptr,
+        .arg,
+        .err_return_trace,
         => return datas[inst].ty,
 
         .assembly,
@@ -720,6 +1013,18 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .cmpxchg_weak,
         .cmpxchg_strong,
         .slice,
+        .shuffle,
+        .aggregate_init,
+        .union_init,
+        .field_parent_ptr,
+        .cmp_vector,
+        .add_with_overflow,
+        .sub_with_overflow,
+        .mul_with_overflow,
+        .shl_with_overflow,
+        .ptr_add,
+        .ptr_sub,
+        .try_ptr,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -732,6 +1037,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .optional_payload,
         .optional_payload_ptr,
         .optional_payload_ptr_set,
+        .errunion_payload_ptr_set,
         .wrap_optional,
         .unwrap_errunion_payload,
         .unwrap_errunion_err,
@@ -749,10 +1055,13 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .array_to_slice,
         .float_to_int,
         .int_to_float,
+        .splat,
         .get_union_tag,
         .clz,
         .ctz,
         .popcount,
+        .byte_swap,
+        .bit_reverse,
         => return air.getRefType(datas[inst].ty_op.ty),
 
         .loop,
@@ -766,6 +1075,12 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
 
         .breakpoint,
         .dbg_stmt,
+        .dbg_inline_begin,
+        .dbg_inline_end,
+        .dbg_block_begin,
+        .dbg_block_end,
+        .dbg_var_ptr,
+        .dbg_var_val,
         .store,
         .fence,
         .atomic_store_unordered,
@@ -775,15 +1090,24 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .memset,
         .memcpy,
         .set_union_tag,
-        => return Type.initTag(.void),
+        .prefetch,
+        .set_err_return_trace,
+        => return Type.void,
 
         .ptrtoint,
         .slice_len,
-        => return Type.initTag(.usize),
+        .ret_addr,
+        .frame_addr,
+        => return Type.usize,
+
+        .wasm_memory_grow => return Type.i32,
+        .wasm_memory_size => return Type.u32,
 
         .bool_to_int => return Type.initTag(.u1),
 
-        .call => {
+        .tag_name, .error_name => return Type.initTag(.const_slice_u8_sentinel_0),
+
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
             const callee_ty = air.typeOf(datas[inst].pl_op.operand);
             switch (callee_ty.zigTypeTag()) {
                 .Fn => return callee_ty.fnReturnType(),
@@ -803,6 +1127,19 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .atomic_rmw => {
             const ptr_ty = air.typeOf(datas[inst].pl_op.operand);
             return ptr_ty.elemType();
+        },
+
+        .reduce => return air.typeOf(datas[inst].reduce.operand).childType(),
+
+        .mul_add => return air.typeOf(datas[inst].pl_op.operand),
+        .select => {
+            const extra = air.extraData(Air.Bin, datas[inst].pl_op.payload).data;
+            return air.typeOf(extra.lhs);
+        },
+
+        .@"try" => {
+            const err_union_ty = air.typeOf(datas[inst].pl_op.operand);
+            return err_union_ty.errorUnionPayload();
         },
     }
 }
@@ -876,4 +1213,13 @@ pub fn value(air: Air, inst: Air.Inst.Ref) ?Value {
         .const_ty => unreachable,
         else => return air.typeOfIndex(inst_index).onePossibleValue(),
     }
+}
+
+pub fn nullTerminatedString(air: Air, index: usize) [:0]const u8 {
+    const bytes = std.mem.sliceAsBytes(air.extra[index..]);
+    var end: usize = 0;
+    while (bytes[end] != 0) {
+        end += 1;
+    }
+    return bytes[0..end :0];
 }

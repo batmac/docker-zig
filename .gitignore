@@ -11,6 +11,3 @@
 vendor/
 dist/
 old/
-
-*\.tar\.*
-*\.xz

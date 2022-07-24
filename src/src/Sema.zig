@@ -7252,6 +7252,7 @@ fn zirFunc(
         src_locs,
         null,
         0,
+        false,
     );
 }
 
@@ -7382,6 +7383,7 @@ fn funcCommon(
     src_locs: Zir.Inst.Func.SrcLocs,
     opt_lib_name: ?[]const u8,
     noalias_bits: u32,
+    is_noinline: bool,
 ) CompileError!Air.Inst.Ref {
     const fn_src = LazySrcLoc.nodeOffset(src_node_offset);
     const ret_ty_src: LazySrcLoc = .{ .node_offset_fn_type_ret_ty = src_node_offset };
@@ -7577,6 +7579,10 @@ fn funcCommon(
             });
         }
 
+        if (cc_workaround == .Inline and is_noinline) {
+            return sema.fail(block, cc_src, "'noinline' function cannot have callconv 'Inline'", .{});
+        }
+
         break :fn_ty try Type.Tag.function.create(sema.arena, .{
             .param_types = param_types,
             .comptime_params = comptime_params.ptr,
@@ -7657,6 +7663,7 @@ fn funcCommon(
         .rbrace_column = @truncate(u16, src_locs.columns >> 16),
         .param_names = param_names,
         .branch_quota = default_branch_quota,
+        .is_noinline = is_noinline,
     };
     if (maybe_inferred_error_set_node) |node| {
         new_func.inferred_error_sets.prepend(node);
@@ -9838,6 +9845,21 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     const result = mod.importFile(block.getFileScope(), operand) catch |err| switch (err) {
         error.ImportOutsidePkgPath => {
             return sema.fail(block, operand_src, "import of file outside package path: '{s}'", .{operand});
+        },
+        error.PackageNotFound => {
+            const cur_pkg = block.getFileScope().pkg;
+            const parent = if (cur_pkg == sema.mod.main_pkg or cur_pkg == sema.mod.root_pkg)
+                "root"
+            else if (cur_pkg.parent) |parent| blk: {
+                var it = parent.table.iterator();
+                while (it.next()) |pkg| {
+                    if (pkg.value_ptr.* == cur_pkg) {
+                        break :blk pkg.key_ptr.*;
+                    }
+                }
+                unreachable;
+            } else unreachable;
+            return sema.fail(block, operand_src, "no package named '{s}' available within package '{s}'", .{ operand, parent });
         },
         else => {
             // TODO: these errors are file system errors; make sure an update() will
@@ -18428,6 +18450,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     const is_var_args = extra.data.bits.is_var_args;
     const is_inferred_error = extra.data.bits.is_inferred_error;
     const is_extern = extra.data.bits.is_extern;
+    const is_noinline = extra.data.bits.is_noinline;
 
     return sema.funcCommon(
         block,
@@ -18445,6 +18468,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         src_locs,
         lib_name,
         noalias_bits,
+        is_noinline,
     );
 }
 

@@ -210,9 +210,9 @@ pub fn build(b: *Builder) !void {
             2 => {
                 // Untagged development build (e.g. 0.9.0-dev.2025+ecf0050a9).
                 var it = mem.split(u8, git_describe, "-");
-                const tagged_ancestor = it.next() orelse unreachable;
-                const commit_height = it.next() orelse unreachable;
-                const commit_id = it.next() orelse unreachable;
+                const tagged_ancestor = it.first();
+                const commit_height = it.next().?;
+                const commit_id = it.next().?;
 
                 const ancestor_ver = try std.builtin.Version.parse(tagged_ancestor);
                 if (zig_version.order(ancestor_ver) != .gt) {
@@ -484,7 +484,20 @@ pub fn build(b: *Builder) !void {
     ));
 
     toolchain_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
-    toolchain_step.dependOn(tests.addStandaloneTests(b, test_filter, modes, skip_non_native, enable_macos_sdk, target, omit_stage2));
+    toolchain_step.dependOn(tests.addStandaloneTests(
+        b,
+        test_filter,
+        modes,
+        skip_non_native,
+        enable_macos_sdk,
+        target,
+        omit_stage2,
+        b.enable_darling,
+        b.enable_qemu,
+        b.enable_rosetta,
+        b.enable_wasmtime,
+        b.enable_wine,
+    ));
     toolchain_step.dependOn(tests.addLinkTests(b, test_filter, modes, enable_macos_sdk, omit_stage2));
     toolchain_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
     toolchain_step.dependOn(tests.addCliTests(b, test_filter, modes));
@@ -751,7 +764,7 @@ fn findAndParseConfigH(b: *Builder, config_h_path_option: ?[]const u8) ?CMakeCon
         inline for (mappings) |mapping| {
             if (mem.startsWith(u8, line, mapping.prefix)) {
                 var it = mem.split(u8, line, "\"");
-                _ = it.next().?; // skip the stuff before the quote
+                _ = it.first(); // skip the stuff before the quote
                 const quoted = it.next().?; // the stuff inside the quote
                 @field(ctx, mapping.field) = toNativePathSep(b, quoted);
             }

@@ -3,7 +3,7 @@ WORKDIR /
 ARG TARGETPLATFORM
 RUN apt-get update && apt-get install --no-install-recommends -y wget xz-utils
 COPY get.pl *.xz ./
-# ADD http://worldclockapi.com/api/json/utc/now builddate
+ADD http://worldclockapi.com/api/json/utc/now builddate
 RUN ./get.pl $TARGETPLATFORM
 
 FROM --platform=$BUILDPLATFORM alpine:edge AS getter
